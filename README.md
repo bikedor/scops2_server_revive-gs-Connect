@@ -284,6 +284,22 @@ On every client, set the **DNS server manually to the server's IP**.
 
 ### PCSX2
 
+**Quick setup (Windows):**
+
+1. Install [Npcap](https://npcap.com) and reboot if asked.
+2. **Settings -> Network & HDD:** tick **Enable Ethernet Device**, set **Ethernet Device Type** to `PCAP Bridged` and **Ethernet Device** to your **wired** adapter (Wi-Fi bridging is unreliable).
+3. Run `ipconfig` and note your **Default Gateway** and subnet mask.
+4. Tick **Intercept DHCP**. It is what lets PCSX2 set the PS2's address fields. Untick **Auto** and fill in:
+   - **PS2 Address:** an unused address in your LAN range (a different one for every PCSX2 instance)
+   - **Subnet Mask:** the same as your PC
+   - **Gateway Address:** your own Default Gateway from `ipconfig` (do not copy one from this README)
+   - **DNS 1 and DNS 2:** the server's IP (the public IP of the server you are joining)
+5. Set the PS2 network config on the memory card to get its address automatically (DHCP), then restart the game in PCSX2 (settings are read at startup).
+6. Optional: run `SCOPS_PCSX2_Firewall.bat` (adds Windows Firewall rules for UDP 3658, 10070-10080, 45000-45012 and the server TCP ports; `SCOPS_PCSX2_Firewall.bat remove` deletes them). It matters mostly in Sockets mode; PCAP Bridged traffic mostly bypasses Windows Firewall.
+7. To **host**, forward UDP 3658 and 10070-10080 on your router to your PC, unless the server runs the UDP relay. Joining needs nothing.
+
+Details and troubleshooting:
+
 - Use **PCAP Bridged** so the emulated PS2 gets its own LAN address, with a different **PS2 Address** for every instance and the DNS set to the server's IP. Wi-Fi is unreliable (a real PS2 could not join PCSX2 rooms hosted over Wi-Fi), and two Wi-Fi machines may not be able to join each other (check the router for client isolation).
 - If the server runs on the same PC as PCSX2, do **not** bridge PCSX2 to the adapter carrying the server's IP: the instances then never get past DNAS. What worked: a **second wired adapter** (a cheap USB-to-Ethernet dongle) plugged into the same router and used only for PCSX2. In Windows give the dongle a fixed IPv4 address in the same subnet (for example `192.168.1.250/24`) with **no gateway** and an interface metric of 500 (Advanced, untick automatic metric) so Windows doesn't route normal traffic through it. Removing IPv4 from the dongle entirely makes PCSX2 report "No network adaptor detected". With this setup a real PS2 can join rooms hosted by PCSX2 and the reverse.
 - Sockets mode can join rooms but cannot host, because it reports `192.0.2.100` as its address.
@@ -361,6 +377,7 @@ tools/ubigs_router_wm_server.py   lobby / wait-module server (main file)
 tools/ubigs_router_server.py      router (port 40000), optional KE1 variant
 tools/nat2/udp_reply_server.py    NAT service on UDP 45000+ (even-length replies) and the UDP relay
 tools/nat_check/                  NAT type probes for the relay design
+SCOPS_PCSX2_Firewall.bat          PCSX2 player helper: Windows Firewall rules for playing and hosting (add / remove)
 open_ports.ps1                    adds the Windows firewall rules for the server and relay
 docs/RELAY.md                     relay design, test log and limits
 tools/net_utils.py                LAN/outside client checks and public-IP selection (SCCT_PUBLIC_IP)
