@@ -299,6 +299,8 @@ HOLE_STALE_S = float(os.environ.get("SCCT_RELAY_HOLE_STALE_S", "100"))
 # 2026-11-05 19:xx the console acked 18 segments with no stall and only our self-imposed cap of 10 dropped DORDOR's 11th
 # link. A joiner behind a symmetric NAT (Windows ICS) gets a fresh external port per match, so a long 3-player session
 # needs dozens. The "stops reacting around 11" seen on 2026-11-04 was unserialized steers overflowing the 536 B window.
+# Correction, logs of 2026-11-06: serialized steers stop working too. Steers 1-11 got a first ping, 12-14 got none, so the
+# console itself stops at about 11 per login (one PS2 host; not checked on other consoles or PCSX2). See HOLE_ADAPTIVE.
 HOLE_BUDGET = int(os.environ.get("SCCT_RELAY_HOLE_BUDGET", "40"))
 # Joiner source port -> hole index (the console uses sockets 10071-10073 for its outbound links and reuses each link
 # later - a game link went idle for minutes and came back for a rematch - so the mapping must be permanent).
@@ -347,6 +349,40 @@ RELAY_DUMP = int(os.environ.get("SCCT_RELAY_DUMP", "0") or 0)
 # every other endpoint of the same joiner IP seen within that many seconds (a client may use two ports for one join).
 RELAY_FANOUT_S = float(os.environ.get("SCCT_RELAY_FANOUT_S", "0") or 0)
 NAT_MAIN_SOCK = None        # the 45000 socket (host-facing side of the relay)
+IPCHG_LOG_S = 60.0          # "joiner IP changes" is logged at most this often per (host, new joiner IP)
+_IPCHG_LOGGED: dict = {}
+# Adaptive steering. Logs of 2026-11-06/07: a PS2 stopped honouring steers after 11 in one login (12-14 got no ping although
+# HOLE_BUDGET is 40), but the same host answered on holes it had not pinged for nearly an hour, 6 times out of 6, 10-14 s after
+# the link opened. So its NAT lets a joiner's packets in without a ping first and most steers are wasted on it.
+# Evidence is always collected and logged. SCCT_RELAY_ADAPTIVE_STEER=1 also acts on it. Off by default: one host's data so far.
+HOLE_ADAPTIVE = os.environ.get("SCCT_RELAY_ADAPTIVE_STEER", "0").strip().lower() not in ("0", "off", "false", "no", "")
+HOLE_OPEN_GAP_S = float(os.environ.get("SCCT_RELAY_HOLE_OPEN_GAP_S", "200"))    # longer than any mapping lasts without host traffic
+HOLE_OPEN_HITS = int(os.environ.get("SCCT_RELAY_HOLE_OPEN_HITS", "2"))          # evidence needed before a host counts as open
+HOLE_OPEN_MISSES = int(os.environ.get("SCCT_RELAY_HOLE_OPEN_MISSES", "2"))      # rescues in a row that turn it back off
+HOLE_OPEN_WAIT_S = float(os.environ.get("SCCT_RELAY_HOLE_OPEN_WAIT_S", "20"))   # how long an open host may stay silent before a rescue steer
+HOLE_ADAPT_GAP_S = float(os.environ.get("SCCT_RELAY_HOLE_ADAPT_GAP_S", "26"))   # steers at least one ping cycle (25 s) apart
+HOLE_ADAPT_SPARE_MAX = int(os.environ.get("SCCT_RELAY_HOLE_ADAPT_SPARE_MAX", "8"))  # spare steers stop here; the rest of the ~11 are kept for rescues
+HOST_NAT: dict = {}         # host ip -> {"hits": n, "misses": n, "open": bool}; survives re-logins, cleared by a server restart
+
+
+def note_host_reply(host: str, port: int, now: float) -> None:
+    """Call for game data from a host on a hole, BEFORE HOST_TRAFFIC is updated. If the host has sent nothing through this
+    hole (no ping, no data) for longer than any mapping lasts, our packet reached it through a mapping that did not exist for
+    this hole: its NAT filters by address only, so it needs no steering."""
+    last = HOST_TRAFFIC.get(host, {}).get(port, 0.0)
+    if last > 0.0 and now - last <= HOLE_OPEN_GAP_S:
+        return
+    sent = RELAY_TRAFFIC.get(host, {}).get(port, 0.0)
+    if sent <= 0.0 or now - sent > HOLE_OPEN_WAIT_S:
+        return    # not an answer to anything we just delivered
+    st = HOST_NAT.setdefault(host, {"hits": 0, "misses": 0, "open": False})
+    st["hits"] += 1
+    st["misses"] = 0
+    log(f"HOLE open-NAT evidence #{st['hits']}: {host} answered on hole {port}, which it " +
+        ("never pinged" if last <= 0.0 else f"last used {now - last:.0f}s ago"))
+    if not st["open"] and st["hits"] >= HOLE_OPEN_HITS:
+        st["open"] = True
+        log(f"HOLE adaptive: {host} looks address-restricted" + ("; rescue steers only after a long silence" if HOLE_ADAPTIVE else " (SCCT_RELAY_ADAPTIVE_STEER is off, steering unchanged)"))
 
 
 def _parse_port_list(spec: str) -> list[int]:
@@ -478,7 +514,10 @@ def relay_from_joiner(sock: socket.socket, data: bytes, addr: tuple[str, int], n
         log(f"RELAY host {host}: flow opened by {addr[0]}:{addr[1]} via relay port {sock.getsockname()[1]} -> {host}:{RELAY_HOST_PORT} from {NAT_MAIN_SOCK.getsockname()[1]}")
     elif hv["joiner"] != addr or hv["sock"] is not sock:
         if hv["joiner"][0] != addr[0]:
-            log(f"RELAY host {host}: joiner IP changes {hv['joiner'][0]} -> {addr[0]} (v1: one joiner per host, replies follow the last sender)")
+            # With several joiners on one host this fires on almost every packet (88% of the log on 2026-11-06): once a minute is enough.
+            if now - _IPCHG_LOGGED.get((host, addr[0]), -1e9) >= IPCHG_LOG_S:
+                _IPCHG_LOGGED[(host, addr[0])] = now
+                log(f"RELAY host {host}: joiner IP changes {hv['joiner'][0]} -> {addr[0]} (v1: one joiner per host, replies follow the last sender)")
         elif addr not in hv["eps"]:
             log(f"RELAY host {host}: joiner {addr[0]} now also sends from port {addr[1]} (replies follow the last sender)")
         hv["joiner"] = addr
@@ -538,6 +577,7 @@ def relay_from_host(data: bytes, addr: tuple[str, int], now: float, nat_port: in
     if RELAY_ALT_HOST_PORTS and not RELAY_HOLES:
         SOCKET_EXT.setdefault(addr[0], {})   # replies come from the host socket the link was delivered to
     if RELAY_HOLES and nat_port in RELAY_HOLES:
+        note_host_reply(addr[0], nat_port, now)
         HOST_TRAFFIC.setdefault(addr[0], {})[nat_port] = now
         ext = HOST_EXT.setdefault(addr[0], {})
         if ext.get(nat_port) != addr[1]:
@@ -598,7 +638,8 @@ def link_summary(now: float) -> None:
             r, t = rx.get(ep, 0), tx.get(ep, 0)
             pr, pt = prev.get(ep, (0, 0))
             prev[ep] = (r, t)
-            dr, dt = r - pr, t - pt
+            # the counters restart when a joiner is reset; do not show that as a negative count
+            dr, dt = (r - pr if r >= pr else r), (t - pt if t >= pt else t)
             if dr == 0 and dt == 0 and now - hv["eps"][ep][1] > LINK_SUMMARY_S:
                 continue
             hole = hv.get("src", {}).get(ep, "?")
@@ -638,6 +679,13 @@ def hole_steering(now: float) -> None:
         confirmed = clt.hole_target is None or traffic.get(clt.hole_target, 0.0) >= clt.hole_last
         if not confirmed and now - clt.hole_last < HOLE_MIN_S:
             continue
+        # A steer only re-targets the console's 25 s ping cycle, so a second one inside that cycle wastes the first. "Confirmed"
+        # above can be satisfied by game data on the hole, which is how steers ended up 12-15 s apart on 2026-11-06.
+        if HOLE_ADAPTIVE and clt.hole_target is not None and now - clt.hole_last < HOLE_ADAPT_GAP_S:
+            continue
+        nat_st = HOST_NAT.get(clt.addr, {})
+        open_nat = HOLE_ADAPTIVE and nat_st.get("open", False)
+        rescue = False
         target = None
         why = ""
         if clt.hole_target is None:
@@ -651,6 +699,8 @@ def hole_steering(now: float) -> None:
                         continue      # link not sending right now
                     if port == clt.hole_target:
                         continue      # already the ping target
+                    if open_nat and now - since.get(port, now) <= HOLE_OPEN_WAIT_S:
+                        continue      # this host answers without a steer, usually within 10-14 s: give it the time
                     if port not in traffic:
                         dead.append((1e9, port, ep))   # never opened: steer at once
                     elif now - traffic.get(port, 0.0) > HOLE_DEAD_S and now - since.get(port, now) > HOLE_DEAD_S:
@@ -662,7 +712,10 @@ def hole_steering(now: float) -> None:
                 if dead:
                     age, target, ep = max(dead)
                     why = f"link {ep[0]}:{ep[1]} sending, host silent on {target} " + ("(never opened)" if age >= 1e9 else f"for {age:.0f}s")
-            if target is None and confirmed and hv is not None:
+                    rescue = open_nat
+            # A ready spare is what gives a new link an instant reply (a join gives up after about 5 s), so an open-NAT host
+            # still gets spares, but only while enough of its ~11 honoured steers remain for rescues.
+            if target is None and confirmed and hv is not None and not (open_nat and clt.hole_count >= HOLE_ADAPT_SPARE_MAX):
                 # Keep one spare hole the console pings, so the next NEW joiner link gets an instant reply. But steer
                 # only when no already-open hole could serve that link, because every steer spends the console's scarce
                 # budget (~11 per login). An open hole (host pinging it, or host sent <HOLE_DEAD_S ago) whose occupants
@@ -683,6 +736,11 @@ def hole_steering(now: float) -> None:
                         why = f"spare: hole {clt.hole_target} now carries a live link and no open hole is free"
         if target is None:
             continue
+        if rescue:
+            nat_st["misses"] = nat_st.get("misses", 0) + 1
+            if nat_st["misses"] >= HOLE_OPEN_MISSES:
+                nat_st.update(open=False, hits=0, misses=0)
+                log(f"HOLE adaptive: {clt.addr} stayed silent {HOLE_OPEN_MISSES} times without a steer; back to normal steering")
         try:
             xr, xpid = nat_reply(msg, gsm.NAT_MSG.PORT_ID, 0, target, pick_id=True)
             clt.reqs[xpid] = {"msg": msg, "sock": "1", "pending": True, "extra": True, "port": target, "ts": now}

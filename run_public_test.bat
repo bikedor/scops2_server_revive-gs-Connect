@@ -10,8 +10,11 @@ set SCCT_NAT_PUBLIC_ADDR=1
 rem SCCT_RELAY=1: outside joiners behind a different NAT than the host are routed through this server (UDP relay on
 rem 3658/10070-10080 -> host via 45000). Needs no port forwarding on the host's side. SCCT_RELAY_IP defaults to SCCT_PUBLIC_IP.
 set SCCT_RELAY=1
-rem Hex-dump the first 24 datagrams per direction of each relayed flow (to learn the peer protocol for multi-joiner routing).
-set SCCT_RELAY_DUMP=300
+rem Hex-dump the first N datagrams per direction of each relayed flow. Debugging only: it grows the log and records traffic.
+set SCCT_RELAY_DUMP=0
+rem Adaptive steering (off by default, not yet tried in a real session). The relay always logs "HOLE open-NAT evidence" when a
+rem host answers on a hole it never pinged. With 1 it also stops spending steers on such a host, and spaces all steers out.
+set SCCT_RELAY_ADAPTIVE_STEER=0
 rem Multi-hole relay v3: three holes on the host's 3658 socket (45001-45003), one per joiner link. A hole is OPENED by a
 rem steering PORT_ID (login + when a new link finds the host silent); once it has carried traffic both ways the relay keeps it
 rem open with an empty datagram every 45 s (conntrack refresh) - no steering budget spent. Host sockets 10071-10073 do not

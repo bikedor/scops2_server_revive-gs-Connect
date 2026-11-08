@@ -523,6 +523,76 @@ def _req_payload_strs(msg):
         return []
 
 
+# Kick and ban. The host sends ['10', [room, name, '']] (kick), ['36', [room, name, '']] (ban) and ['40', [room, name]]
+# (unban). In the captures of 2026-11-08 the removed player's game leaves by itself after a packet on the game link, and
+# the server pushes nothing to it. What the server has to do is remember a ban, or the player can simply join again.
+# Bans live in memory: they end when the room closes or the lobby server restarts.
+_ROOM_BANS: dict = {}      # room id (str) -> {"master": host name (lower case), "names": set of banned names (lower case)}
+_BAN_LOCK = threading.Lock()
+
+
+def _kickban_on():
+    return os.environ.get("SCCT_KICKBAN", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def _is_banned(room_id, username):
+    """True if username is banned from this room. The stored host must match, because a room id may be used again."""
+    if not _kickban_on() or not username:
+        return False
+    rid = str(room_id)
+    master = None
+    try:
+        for r in _lobby_state.get_rooms():
+            if str(r.group_id) == rid:
+                master = str(r.master).lower()
+                break
+    except Exception:
+        pass
+    with _BAN_LOCK:
+        ent = _ROOM_BANS.get(rid)
+        if ent is None:
+            return False
+        if master is not None and ent["master"] != master:
+            _ROOM_BANS.pop(rid, None)     # left over from an earlier room with the same id
+            return False
+        return str(username).lower() in ent["names"]
+
+
+def _kickban_record(subtype, pl, username, log_fp=None):
+    """Note a kick (10), ban (36) or unban (40). Only the room's host can change the ban list: the game also sends 40 with
+    every invite, and a joiner must not be able to lift a ban."""
+    if not _kickban_on() or len(pl) < 2:
+        return
+    rid, victim = str(pl[0]), str(pl[1])
+    what = {10: "KICK", 36: "BAN", 40: "UNBAN"}.get(subtype, str(subtype))
+    master = None
+    try:
+        for r in _lobby_state.get_rooms():
+            if str(r.group_id) == rid:
+                master = str(r.master)
+                break
+    except Exception:
+        pass
+    is_host = master is not None and master.lower() == str(username or "").lower()
+    if subtype == 10:
+        log_line(f"[{now_ts()}] ROUTER_WM {what} room={rid} target={victim!r} by {username!r} host={is_host}", log_fp=log_fp)
+        return
+    if not is_host or victim.lower() == master.lower():
+        log_line(f"[{now_ts()}] ROUTER_WM {what} ignored: room={rid} target={victim!r} by {username!r} (room host is {master!r})", log_fp=log_fp)
+        return
+    with _BAN_LOCK:
+        ent = _ROOM_BANS.get(rid)
+        if ent is None or ent["master"] != master.lower():
+            ent = {"master": master.lower(), "names": set()}
+            _ROOM_BANS[rid] = ent
+        if subtype == 36:
+            ent["names"].add(victim.lower())
+        else:
+            ent["names"].discard(victim.lower())
+        count = len(ent["names"])
+    log_line(f"[{now_ts()}] ROUTER_WM {what} room={rid} target={victim!r} by host {username!r} ({count} banned in this room)", log_fp=log_fp)
+
+
 _WM_CONNS = {}
 
 
@@ -643,14 +713,31 @@ def _find_registered_user(userdb, name):
     """Canonical (stored) spelling of a registered user name, or None."""
     if userdb is None or not name:
         return None
-    try:
+
+    def _scan():
         with userdb._lock:
             for k in (userdb._data.get("users") or {}):
                 if k.lower() == name.lower():
                     return k
+        return None
+
+    try:
+        hit = _scan()
+        if hit is not None:
+            return hit
+        # New accounts are written to users.json by the router process (40000), and this lobby process only reads the
+        # file at startup, so anyone who registered later looked unknown and friend requests to them were refused. Read
+        # the file again on a miss. Use a separate UserDB: load() empties the data when a read fails (for example while
+        # the router is replacing the file), and a failed reload must not cost us the accounts we already know.
+        fresh = type(userdb)(str(userdb.path))
+        fresh.load()
+        fresh_users = fresh._data.get("users") or {}
+        if fresh_users:
+            with userdb._lock:
+                userdb._data.setdefault("users", {}).update(fresh_users)
+        return _scan()
     except Exception:
         return None
-    return None
 
 
 def _build_gs_frame(msg_type, dl_list, b5=0x14):
@@ -2156,6 +2243,9 @@ def handle_message(
                 return _lobby_reply(msg, 106, [_who] + _entries)
             return _lobby_raw_reply(msg, 106, [_who] + _entries)
 
+        if lobby_subtype in (10, 36, 40):
+            _kickban_record(lobby_subtype, _req_payload_strs(msg), clt.username, log_fp=log_fp)
+
         if lobby_subtype in (36, 40) and os.environ.get("SCCT_BAN_REPLY", "none").strip().lower() not in ("off", "false", "no", "old"):
             # PLAYER_BAN / PLAYER_UNBAN: the game sends PLAYER_UNBAN [room, player] with every invite. The generic
             # untyped reply used before is a stray reply that can upset the client's reply queue; answer with a typed
@@ -2540,6 +2630,12 @@ def handle_message(
                 # Round 33: proper refusal (GROUP_NOT_EXIST) instead of the generic stray reply
                 log_line(f"[{now_ts()}] ROUTER_WM JOIN_ROOM room {want} not found: refusal reply [39,[24,[1,{want}]]]", log_fp=log_fp)
                 return _lobby_fail(msg, 24, 1, want)
+            if target is not None and _is_banned(target.group_id, clt.username):
+                # The game has no "you are banned" reason that we know of, so refuse as "room full" (7). Not yet tried in
+                # the real game; SCCT_BAN_JOIN_REASON changes the code (1 = "no longer available").
+                _bar = int(os.environ.get("SCCT_BAN_JOIN_REASON", "7") or 7)
+                log_line(f"[{now_ts()}] ROUTER_WM JOIN_ROOM {clt.username!r} is banned from room {want}: refusal reply [39,[24,[{_bar},{want}]]]", log_fp=log_fp)
+                return _lobby_fail(msg, 24, _bar, want)
             if target is None and want >= 0 and os.environ.get("SCCT_STALE_JOIN_CLEAN", "0").strip().lower() not in ("0", "off", "false", "no"):
                 # The client tried to join a room that no longer exists (it still lists it). After the generic failure
                 # reply (the game then shows "The game is no longer available") tell THIS client to drop the room.

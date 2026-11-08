@@ -53,6 +53,7 @@ Turn it on in `run_public_test.bat` (already set there):
 | `SCCT_PUBLIC_IP=<server public IP>` | address advertised to joiners (`SCCT_RELAY_IP` overrides it) |
 | `SCCT_RELAY_HOLES=45001,...,45012` | holes used to steer the host's 3658 socket |
 | `SCCT_RELAY_DUMP=0` | hex-dump N packets per flow for debugging. Leave at 0 in normal use; it grows the log and records traffic |
+| `SCCT_RELAY_ADAPTIVE_STEER=0` | `1` spaces steers one ping cycle apart and stops spending them on hosts that answer without one (off by default, not yet tried in a real session) |
 | `SCCT_RELAY_UNMAP_ON_LEAVE`, `SCCT_RELAY_RESET_ON_JOINER_LEAVE` | forget links when a player leaves the room |
 | `SCCT_AUTO_REGISTER=1` | create an account on first login (off by default; anyone could then create accounts) |
 
@@ -271,6 +272,8 @@ Optional friend settings (defaults work; change only when testing):
 | `SCCT_INVITE_REFRESH` | refresh the host's friend list after an invite is taken |
 | `SCCT_MOTD=0` | turn the News / message of the day off |
 | `SCCT_BAN_REPLY` | how ban/unban notifications are answered (default: no reply) |
+| `SCCT_KICKBAN=1` | remember bans per room and refuse banned players at join; `0` turns this off |
+| `SCCT_BAN_JOIN_REASON=7` | refusal code a banned player gets (7 = room full, 1 = no longer available) |
 
 ## Connecting clients
 
