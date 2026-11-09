@@ -1,2 +1,0 @@
-Welcome to the Splinter Cell: Chaos Theory community server!
-Edit state/motd.txt to change this message.
