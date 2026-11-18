@@ -997,6 +997,68 @@ def _relay_ip() -> str:
     return (os.environ.get("SCCT_RELAY_IP", "").strip() or os.environ.get("SCCT_PUBLIC_IP", "").strip())
 
 
+# Join outcome log (log only; changes nothing sent to players). Each JOIN_ROOM by a non-host starts a watch;
+# the game's "join completed" (lobby msg 34) ends it with "JOIN OK", and no completion within
+# SCCT_JOIN_WATCH_SECONDS (default 30) logs "JOIN NOT COMPLETED". Off with SCCT_JOIN_LOG=0.
+_JOIN_WATCH: dict = {}
+_JOIN_STATS = {"ok": 0, "late": 0, "not_completed": 0}
+_JOIN_WATCH_LOCK = threading.Lock()
+
+
+def _join_log_on() -> bool:
+    return os.environ.get("SCCT_JOIN_LOG", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def _join_watch_start(user, room, host_ip, via, *, log_fp=None) -> None:
+    try:
+        if not _join_log_on():
+            return
+        key = (str(user or "").lower(), str(room))
+        token = object()
+        with _JOIN_WATCH_LOCK:
+            _JOIN_WATCH[key] = {"t0": time.time(), "user": str(user or ""), "room": str(room),
+                                "host": str(host_ip or "?"), "via": via, "token": token}
+        secs = max(5.0, float(os.environ.get("SCCT_JOIN_WATCH_SECONDS", "30")))
+
+        def _check(key=key, token=token, secs=secs):
+            with _JOIN_WATCH_LOCK:
+                w = _JOIN_WATCH.get(key)
+                if w is None or w["token"] is not token:
+                    return
+                w["timed_out"] = True
+                _JOIN_STATS["not_completed"] += 1
+                st = dict(_JOIN_STATS)
+            log_line(f"[{now_ts()}] JOIN NOT COMPLETED room {w['room']} by {w['user']} (host {w['host']}, {w['via']}): "
+                     f"no 'joined' from the game within {secs:.0f}s [joins ok={st['ok']} late={st['late']} "
+                     f"not_completed={st['not_completed']}]", log_fp=log_fp)
+
+        t = threading.Timer(secs, _check)
+        t.daemon = True
+        t.start()
+    except Exception:
+        pass
+
+
+def _join_watch_done(user, room, *, log_fp=None) -> None:
+    try:
+        if not _join_log_on():
+            return
+        key = (str(user or "").lower(), str(room))
+        with _JOIN_WATCH_LOCK:
+            w = _JOIN_WATCH.pop(key, None)
+            if w is None:
+                return
+            late = bool(w.get("timed_out"))
+            _JOIN_STATS["late" if late else "ok"] += 1
+            st = dict(_JOIN_STATS)
+        took = time.time() - w["t0"]
+        tag = "JOIN OK (late)" if late else "JOIN OK"
+        log_line(f"[{now_ts()}] {tag} room {w['room']} by {w['user']} (host {w['host']}, {w['via']}) in {took:.1f}s "
+                 f"[joins ok={st['ok']} late={st['late']} not_completed={st['not_completed']}]", log_fp=log_fp)
+    except Exception:
+        pass
+
+
 def _relay_notify(payload: dict, *, log_fp=None) -> None:
     global _RELAY_SOCK
     if not _relay_enabled():
@@ -1016,6 +1078,23 @@ def _room_host_ip(room) -> str:
     return str(getattr(room, "real_ip_addr", "") or getattr(room, "ip_addr", "") or "")
 
 
+# public IP -> the address the console reported as its own in LOBBYSERVERLOGIN (DL[2]). Equal to the public IP when the
+# console has no router in front of it (DORIAN_D's PS2 on the modem); a private address (192.168.x) means it is behind NAT.
+_LOGIN_LAN_IP: dict = {}
+
+
+def _direct_host_match(creator_ip: str, username: str) -> bool:
+    """SCCT_DIRECT_HOSTS=name,ip,...: hosts whose router really lets outside players reach them (DMZ, or UDP 3658 and
+    10070-10080 forwarded to the console/PCSX2). A room made by such a host is advertised with its own address and
+    skips the relay, so no steering is needed (the game honours only ~11 steers per login). Opt-in only: a host that
+    answers the VPS from an unpinged port is only address-restricted, which does NOT prove other players can reach it."""
+    raw = os.environ.get("SCCT_DIRECT_HOSTS", "")
+    items = {x.strip().lower() for x in raw.replace(";", ",").split(",") if x.strip()}
+    if not items:
+        return False
+    return str(creator_ip or "").strip().lower() in items or str(username or "").strip().lower() in items
+
+
 def _relay_room_at_create(room, creator_ip: str, *, log_fp=None) -> bool:
     """SCCT_RELAY=1: a room hosted by an outside (public) client is advertised with the relay address everywhere
     (fields 18/19 and both blob slots), because the game dials the address from its room list, not from the
@@ -1024,6 +1103,9 @@ def _relay_room_at_create(room, creator_ip: str, *, log_fp=None) -> bool:
         return False
     rip = _relay_ip()
     if not rip or not creator_ip or is_private_addr(creator_ip):
+        return False
+    if _direct_host_match(creator_ip, getattr(room, "master", "")):
+        log_line(f"[{now_ts()}] ROUTER_WM CREATE_ROOM direct: room by {room.master} at {creator_ip} advertised with the host's own address (SCCT_DIRECT_HOSTS), relay skipped", log_fp=log_fp)
         return False
     room.real_ip_addr = creator_ip
     room.ip_addr = rip
@@ -1042,8 +1124,15 @@ def _relay_for_joiner(joiner_ip: str, room, is_host: bool) -> str:
     return str(room.ip_addr or _relay_ip())
 
 
+# Port joiners dial on the relay (it listens on 3658 and 10070-10080). The host's blob carries the EXTERNAL port its
+# router gave the game's 3658 socket; behind a router that changes ports (Strider, 2026-11-11: 3658 -> 51526) a
+# rewrite that kept that port sent every joiner to <relay>:51526, where nothing listens, and all joins failed after ~5 s.
+RELAY_JOIN_PORT = int(os.environ.get("SCCT_RELAY_JOIN_PORT", "3658"))
+
+
 def _rewrite_room_blob(blob: bytes, ip: str) -> bytes:
-    """Replace both address slots of the 96-byte room info blob (ASCII at 48/72, binary at 64/88; ports kept)."""
+    """Point both address slots of the 96-byte room info blob at the relay: ASCII IP at 48/72, binary IP at 64/88,
+    big-endian port at 68/92 (set to RELAY_JOIN_PORT; SCCT_RELAY_JOIN_PORT=0 keeps the host's ports as before)."""
     try:
         if not isinstance(blob, (bytes, bytearray)) or len(blob) != 96:
             return blob
@@ -1054,6 +1143,10 @@ def _rewrite_room_blob(blob: bytes, ip: str) -> bytes:
         b[64:68] = raw
         b[72:88] = txt
         b[88:92] = raw
+        if RELAY_JOIN_PORT:
+            port = RELAY_JOIN_PORT.to_bytes(2, "big")
+            b[68:70] = port
+            b[92:94] = port
         return bytes(b)
     except Exception:
         return blob
@@ -1241,6 +1334,50 @@ def _build_ct34_dl(
     # 3-field format ['38', '1', [...]] broke pers_proxy connections.
     # 2-field format ['38', ['1', [...]]] is what the game parses correctly.
     return [result, [subtype, module_info]]
+
+
+ACCOUNT_CHECK = os.environ.get("SCCT_ACCOUNT_CHECK", "1").strip().lower() not in ("0", "off", "false", "no")
+ACCOUNT_LOGIN_MAX_S = float(os.environ.get("SCCT_ACCOUNT_LOGIN_MAX_S", str(12 * 3600)))
+
+
+def _account_change_allowed(clt, target, userdb) -> tuple[bool, str]:
+    """Password change / account removal (from the Pandora Tomorrow v32 server). Before, the server changed or deleted
+    whatever account the request named, so anyone could reset or delete another player's account. Now the request must
+    come from the address where that account last logged in with its password (the router's LOGIN, which may be another
+    connection or process), within ACCOUNT_LOGIN_MAX_S, and the connection must not be identified as another player.
+    SCCT_ACCOUNT_CHECK=0 restores the old behaviour."""
+    if not ACCOUNT_CHECK:
+        return True, "check off"
+    if not target:
+        return False, "no account named"
+    cu = getattr(clt, "username", None)
+    if cu and str(cu).lower() != str(target).lower():
+        return False, f"connection is {cu!r}"
+    if userdb is None:
+        return False, "no user database"
+    try:
+        userdb.load()
+    except Exception:
+        pass
+    u = userdb.get_user(target)
+    if not u:
+        return False, "no such account"
+    ip = clt.addr[0] if getattr(clt, "addr", None) else None
+    if u.get("last_login_ip") != ip:
+        return False, f"last password login from {u.get('last_login_ip')!r}, request from {ip!r}"
+    if time.time() - float(u.get("last_login_ts", 0)) > ACCOUNT_LOGIN_MAX_S:
+        return False, "last password login too long ago"
+    return True, "verified login from this address"
+
+
+def _account_fail(msg, mtype_value: int):
+    import gsm
+    from data import List
+    r = gsm.GSMResponse(msg)
+    r.header.property = gsm.PROPERTY.GS
+    r.header.type = gsm.MESSAGE_TYPE.GSFAIL
+    r.dl = List([mtype_value.to_bytes(1, "little")])
+    return r
 
 
 def handle_message(
@@ -1591,6 +1728,12 @@ def handle_message(
 
         if login_ok:
             log_line(f"[{now_ts()}] ROUTER_WM LOGIN OK: user={username!r}", log_fp=log_fp)
+            if userdb is not None and username and not login_encrypted_unparsed:
+                try:
+                    userdb.note_login(username, clt.addr[0])
+                    userdb.save()
+                except Exception:
+                    pass
         else:
             log_line(f"[{now_ts()}] ROUTER_WM LOGIN REJECT: user={username!r}", log_fp=log_fp)
             fail_res = gsm.GSMResponse(msg)
@@ -1668,6 +1811,8 @@ def handle_message(
             if msg.dl is not None and msg.dl.lst and isinstance(msg.dl.lst[0], str):
                 clt.username = msg.dl.lst[0]
             svid = str(msg.dl.lst[1]) if msg.dl and len(msg.dl.lst) > 1 else "?"
+            if msg.dl and len(msg.dl.lst) > 2 and isinstance(msg.dl.lst[2], str) and clt.addr:
+                _LOGIN_LAN_IP[str(clt.addr[0])] = msg.dl.lst[2]
             log_line(
                 f"[{now_ts()}] ROUTER_WM LOBBYSERVERLOGIN user={clt.username} svid={svid}",
                 log_fp=log_fp,
@@ -2664,8 +2809,11 @@ def handle_message(
                     _host24 = False
                 _relay24 = _relay_for_joiner(str(clt.addr[0]), target, _host24)
                 if _relay24:
-                    _relay_notify({"op": "map", "joiner": str(clt.addr[0]), "host": _room_host_ip(target), "room": str(target.group_id), "user": str(clt.username or "")}, log_fp=log_fp)
+                    _relay_notify({"op": "map", "joiner": str(clt.addr[0]), "host": _room_host_ip(target), "room": str(target.group_id), "user": str(clt.username or ""),
+                                   "host_lan": _LOGIN_LAN_IP.get(_room_host_ip(target), "")}, log_fp=log_fp)
                     log_line(f"[{now_ts()}] ROUTER_WM JOIN_ROOM relay: joiner {clt.username}@{clt.addr[0]} dials {_relay24} for room {target.group_id} (host {_room_host_ip(target)})", log_fp=log_fp)
+                if not _host24:
+                    _join_watch_start(clt.username, target.group_id, _room_host_ip(target), "relay" if _relay24 else "direct", log_fp=log_fp)
                 if _host24 and os.environ.get("SCCT_NEW_GROUP_TO_CREATOR", "").strip().lower() in ("1", "on", "true", "yes", "late"):
                     # Round 25: the client only sets its current room from NEW_GROUP(54) AFTER it has processed the
                     # CREATE_ROOM reply (it queues a pending "created room" event there). The JOIN_ROOM reply is
@@ -2728,6 +2876,7 @@ def handle_message(
                 _lobby_state.__dict__.setdefault("played", set()).add(str(_a34))
                 _lobby_state.set_ctx(session_key or f"{clt.addr[0]}:{clt.addr[1]}", _a34)
                 log_line(f"[{now_ts()}] ROUTER_WM room {_a34} joined successfully by {clt.username}; marked as played", log_fp=log_fp)
+                _join_watch_done(clt.username, _a34, log_fp=log_fp)
             except Exception:
                 pass
 
@@ -3322,6 +3471,10 @@ def handle_message(
         if not username and hasattr(clt, 'username') and clt.username:
             username = clt.username
 
+        _ok, _why = _account_change_allowed(clt, username, userdb)
+        if not _ok:
+            log_line(f"[{now_ts()}] ROUTER_WM MODIFYUSER REFUSED: user={username!r} from {clt.addr[0]} ({_why})", log_fp=log_fp)
+            return _account_fail(msg, gsm.MESSAGE_TYPE.MODIFYUSER.value)
         if userdb is not None and username and new_password is not None:
             userdb.upsert_user(username=username, password=new_password)
             try:
@@ -3349,6 +3502,10 @@ def handle_message(
         if not username and hasattr(clt, 'username') and clt.username:
             username = clt.username
 
+        _ok, _why = _account_change_allowed(clt, username, userdb)
+        if not _ok:
+            log_line(f"[{now_ts()}] ROUTER_WM REMOVEACCOUNT REFUSED: user={username!r} from {clt.addr[0]} ({_why})", log_fp=log_fp)
+            return _account_fail(msg, gsm.MESSAGE_TYPE.REMOVEACCOUNT.value)
         if userdb is not None and username:
             userdb.remove_user(username)
             try:

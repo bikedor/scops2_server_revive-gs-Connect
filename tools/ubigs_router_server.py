@@ -169,6 +169,36 @@ def _extract_login_fields(msg) -> tuple[str | None, str | None, str | None]:
         return (None, None, None)
 
 
+# --- Game check at login (SCCT_GAME_CHECK, SCCT_ALLOWED_GAMES) ---------------------------------------------------
+# Each game sends its product id in LOGIN (and NEWUSERREQUEST), e.g. 'SC3PS2US1.0' for Chaos Theory NTSC. Other Ubisoft
+# PS2 games reach this server too (2026-11-12/13: Pandora Tomorrow 'PTPS2US1.0', 'NZPS2US1.0', Ghost Recon 2
+# 'GR2PS21.0') and ended up counted in the Chaos Theory lobby although they can never join a room.
+#   SCCT_ALLOWED_GAMES  comma-separated id prefixes that may log in (default SC3PS2 = every Chaos Theory region).
+#                       Later, to host another game here: add its prefix, e.g. SC3PS2,PTPS2
+#   SCCT_GAME_CHECK     refuse (default): other games get the normal login failure and no account is created
+#                       log: let them in but log the game;  off: no check at all
+GAME_NAMES = {"SC3PS2": "Splinter Cell Chaos Theory", "PTPS2": "Splinter Cell Pandora Tomorrow",
+              "GR2PS2": "Ghost Recon 2", "NZPS2": "'Nimitz' (Ubisoft PS2 title)"}
+
+
+def _game_name(dp) -> str:
+    d = str(dp or "").upper()
+    for k, v in GAME_NAMES.items():
+        if d.startswith(k):
+            return v
+    return "unknown game"
+
+
+def _game_check(dp) -> tuple[bool, str]:
+    """Returns (allowed, mode). dp None (payload not parsed) is always allowed."""
+    mode = os.environ.get("SCCT_GAME_CHECK", "refuse").strip().lower()
+    if mode in ("off", "0", "no", "false") or dp is None:
+        return True, mode
+    allowed = [a.strip().upper() for a in os.environ.get("SCCT_ALLOWED_GAMES", "SC3PS2").split(",") if a.strip()]
+    ok = any(str(dp).upper().startswith(a) for a in allowed)
+    return (ok or mode == "log"), mode
+
+
 def _extract_newuser_fields(msg) -> tuple[str | None, str | None, str | None]:
     """Best-effort parse: returns (username, password, dp)."""
     try:
@@ -615,7 +645,16 @@ def handle_message(
             except Exception:
                 pass
         login_ok = True
-        if userdb is not None and not login_encrypted_unparsed:
+        _gok, _gmode = _game_check(dp)
+        if dp is not None and _gmode not in ("off", "0", "no", "false"):
+            _allowed_now = any(str(dp).upper().startswith(x.strip().upper())
+                               for x in os.environ.get("SCCT_ALLOWED_GAMES", "SC3PS2").split(",") if x.strip())
+            if not _allowed_now:
+                log_line(f"[{now_ts()}] ROUTER LOGIN {'REFUSED' if not _gok else 'ALLOWED'} OTHER GAME: user={username!r} "
+                         f"game={dp!r} ({_game_name(dp)}) from {clt.addr[0]} (SCCT_GAME_CHECK={_gmode})", log_fp=log_fp)
+        if not _gok:
+            login_ok = False
+        elif userdb is not None and not login_encrypted_unparsed:
             if username is None:
                 log_line(f"[{now_ts()}] ROUTER LOGIN REJECT: no username parsed", log_fp=log_fp)
                 login_ok = False
@@ -638,6 +677,11 @@ def handle_message(
                 login_ok = False
             else:
                 log_line(f"[{now_ts()}] ROUTER LOGIN OK: user={username!r}", log_fp=log_fp)
+                try:   # account-change check (SCCT_ACCOUNT_CHECK): remember where this account proved its password
+                    userdb.note_login(username, clt.addr[0])
+                    userdb.save()
+                except Exception:
+                    pass
 
         if not login_ok:
             fail_res = gsm.GSMResponse(msg)
@@ -751,7 +795,12 @@ def handle_message(
         # If user already exists, skip creation but let the flow proceed.
         # The game has no GSFAIL handler for NEWUSERREQUEST (it hangs).
         # Instead, let it through to LOGIN where password gets validated.
-        if userdb is not None and username:
+        _gok, _gmode = _game_check(dp)
+        if not _gok:
+            # another game: no account is created; the LOGIN that follows is refused by the same check
+            log_line(f"[{now_ts()}] ROUTER NEWUSERREQUEST REFUSED OTHER GAME: user={username!r} game={dp!r} "
+                     f"({_game_name(dp)}) from {clt.addr[0]} - no account created", log_fp=log_fp)
+        elif userdb is not None and username:
             if userdb.get_user(username) is not None:
                 log_line(f"[{now_ts()}] ROUTER NEWUSERREQUEST SKIP: user={username!r} already exists, proceeding to LOGIN", log_fp=log_fp)
             elif password is not None:

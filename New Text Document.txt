@@ -1,0 +1,48 @@
+@echo off
+setlocal EnableExtensions
+title Prepare the beta branch commit (keeps all files on disk)
+cd /d "%~dp0"
+
+rem ---- find git: PATH first, then the copy inside GitHub Desktop ----
+set "GIT="
+where git >nul 2>&1 && set "GIT=git"
+if not defined GIT for /d %%D in ("%LOCALAPPDATA%\GitHubDesktop\app-*") do if exist "%%~D\resources\app\git\cmd\git.exe" set "GIT=%%~D\resources\app\git\cmd\git.exe"
+if not defined GIT (
+  echo Could not find git. Install Git for Windows, or open this folder once in GitHub Desktop.
+  pause & exit /b 1
+)
+
+set "BR=stable-beta-build-for-gaming-ps2"
+for /f "delims=" %%B in ('"%GIT%" rev-parse --abbrev-ref HEAD') do set "CUR=%%B"
+if /i not "%CUR%"=="%BR%" (
+  echo This folder is on branch "%CUR%", not "%BR%". Switch branch in GitHub Desktop first.
+  pause & exit /b 1
+)
+
+echo Getting the latest state of the branch from GitHub...
+"%GIT%" fetch origin || (echo Fetch failed. Check your internet and try again. & pause & exit /b 1)
+
+echo.
+echo Private files already on GitHub in origin/%BR% (if any):
+"%GIT%" ls-tree -r --name-only origin/%BR% -- logs captures venv state PktMon.etl dnasrep_test/certs tools/certs > "%TEMP%\scops_remote_private.txt"
+findstr /i /r "\.key$ \.key\.bak$ -key\.pem$ ^logs/ ^captures/ ^venv/ ^state/ PktMon\.etl dnasrep_test/.*\.log$" "%TEMP%\scops_remote_private.txt" > "%TEMP%\scops_remote_hits.txt"
+for %%A in ("%TEMP%\scops_remote_hits.txt") do if %%~zA==0 (echo   none) else (echo   FOUND - see %TEMP%\scops_remote_hits.txt  ^(they stay in GitHub history; tell Claude^))
+
+echo.
+echo Undoing local, not-yet-pushed commits (your files on disk are NOT touched)...
+"%GIT%" reset --soft origin/%BR% || (echo Reset failed. & pause & exit /b 1)
+
+echo Leaving private and generated files out of the commit (they stay on disk)...
+"%GIT%" rm -r -q --cached --ignore-unmatch -- captures venv logs state state_backups PktMon.etl beta_config.bat
+"%GIT%" rm -r -q --cached --ignore-unmatch -- "dnasrep_test/*.log" "*.key" "*.key.bak" "*-key.pem" "*.etl" "*.pcap" "*.pcapng"
+"%GIT%" rm -r -q --cached --ignore-unmatch -- ":(glob)**/__pycache__/**" "*.pyc"
+
+echo.
+echo Checking for leftover merge-conflict markers...
+"%GIT%" grep -n -I -E "^(<<<<<<< |>>>>>>> )" -- . ":(exclude)captures" ":(exclude)venv" && (echo ^^^ FIX THESE before committing.) || echo   none
+
+echo.
+echo Done. Now in GitHub Desktop:
+echo   1. Check the Changes list: no logs, captures, venv, .key or -key.pem files should be ticked.
+echo   2. Write a summary, click "Commit to %BR%", then "Push origin".
+pause

@@ -1,0 +1,4 @@
+SCOPS beta
+
+Double-click "BETA Server.bat" to run the beta on this VPS (it stops the main server first and can start it again afterwards).
+Everything else, including the one-time GitHub / VPS setup, is in BETA.md.

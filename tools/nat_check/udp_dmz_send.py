@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run this on the VPS (or any machine outside the host's network) while udp_dmz_listen.py runs on the DMZ PC.
 
-  python tools/nat_check/udp_dmz_send.py 38.27.30.232
+  python tools/nat_check/udp_dmz_send.py 198.18.30.232
 
 Sends a tagged datagram to UDP 3658 and 10070-10080 at the target and waits 3 s for the echo on each.
 'reply' = the port is reachable from the internet (DMZ / forward works). 'no reply' = blocked somewhere in front of the PC.

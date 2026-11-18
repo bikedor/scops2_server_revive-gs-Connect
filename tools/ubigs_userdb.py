@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import threading
 import time
@@ -34,7 +35,7 @@ class UserDB:
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp = self.path.with_suffix(self.path.suffix + f".{os.getpid()}.tmp")   # one temp file per process (they share users.json)
             tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True), encoding="utf-8")
             tmp.replace(self.path)
 
@@ -65,6 +66,14 @@ class UserDB:
         if not u:
             return False
         return str(u.get("password", "")) == str(password)
+
+    def note_login(self, username: str, ip: str) -> None:
+        """Record a password-verified login (router LOGIN). Account changes are only accepted from this address."""
+        with self._lock:
+            u = self._data.get("users", {}).get(username)
+            if isinstance(u, dict):
+                u["last_login_ip"] = str(ip)
+                u["last_login_ts"] = int(time.time())
 
     def remove_user(self, username: str) -> bool:
         with self._lock:

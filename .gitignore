@@ -1,1 +1,24 @@
+# data and machine-specific files: never in the repo
+state/
+state_backups/
+logs/
+captures/
+beta_config.bat
 venv/
+.venv/
+# build and capture leftovers
+__pycache__/
+*.pyc
+*.etl
+*.pcap
+*.pcapng
+*.bundle
+dnasrep_test/*.log
+tools/scopsDNS/build/
+tools/scopsDNS/dist/
+tools/scopsDNS/*.spec
+
+# Private keys: needed on the server, never published
+*.key
+*.key.bak
+*-key.pem

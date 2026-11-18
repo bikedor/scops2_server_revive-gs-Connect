@@ -70,7 +70,7 @@ same-LAN sessions.
 
 ## 2026-11-05 19:14 - joins needed 3-4 tries, nobody loaded into the match (holes die, steering budget spent)
 
-- The host NAT (38.27.30.232) keeps a hole only while the HOST sends through it. Its 3658 socket pings exactly one hole - the last PORT_ID target - every 25 s; a hole it stopped pinging is gone after roughly 60 s (alive at 32 s, dead at ~67 s and beyond). The relay inbound 2-byte keepalives do NOT refresh it (holes pre-opened at 19:09 were all dead by 19:14 despite keepalives every 45 s). Only links the host answers stay open, through the host own game traffic.
+- The host NAT (198.18.30.232) keeps a hole only while the HOST sends through it. Its 3658 socket pings exactly one hole - the last PORT_ID target - every 25 s; a hole it stopped pinging is gone after roughly 60 s (alive at 32 s, dead at ~67 s and beyond). The relay inbound 2-byte keepalives do NOT refresh it (holes pre-opened at 19:09 were all dead by 19:14 despite keepalives every 45 s). Only links the host answers stay open, through the host own game traffic.
 - Pre-opening 6 holes therefore burned 6 of the ~10 steers per login for nothing: every join landed on a dead hole, the dead-hole rule steered (one steer, then up to 25 s for the console ping) while the join probe gives up after 5 s - hence 3-4 attempts per joiner. By the time the match started the budget was at 10/10: DORDOR game link (62773) sat on dead hole 45005 for 70 s with no steer left and both joiners were dropped.
 - New rule (`pick_hole_port` / `hole_steering`): the hole the console is pinging right now is the READY hole. A new joiner endpoint takes it (host answers at once); the console is then steered to the next unassigned hole, which becomes the new spare within 25 s. A joiner second link right behind its join probe shares the probe hole (the host copes, as in every earlier 2-player session) so the spare stays free for the next joiner; the probe port, when the client reuses it for another link later, gets its own hole again. Every endpoint keeps its hole for good. Budget per session: 1 (login) + 1 per join + 1 per game link.
 - Consequence for players: joiners should come in one at a time, ~30 s apart (the spare needs one ping cycle after the previous join). Two joins within the same 25 s put the second one on a hole that is still being opened, and the join probe times out before the ping arrives (retry works).
@@ -85,7 +85,7 @@ same-LAN sessions.
 ## 2026-11-05 20:08 - ~11 matches OK, then DORDOR dropped on a rematch (console steer ceiling is REAL)
 
 - The budget raise let us steer to #12, and that proved the ceiling is the CONSOLE, not our cap: holes 45001-45011 each got a host ping right after their steer, but steer #12 (45012) got no host ping and the host sent no further SRP ACKs. The console stops processing unsolicited PORT_IDs after ~11 per login (536 B SRP receive window; matches the 2026-11-04 observation). Raising SCCT_RELAY_HOLE_BUDGET past ~11 does nothing on its own.
-- DORDOR-SLIM (24.69.254.96, Windows ICS = symmetric NAT) gets a fresh external port every match, so the old "one steer per new hole" cost one steer per match and hit the ceiling at ~match 11. At the failed rematch the host was still pinging hole 45011 (open), but the relay handed the new port a FRESH hole 45012 that needed a steer the console ignored.
+- DORDOR-SLIM (192.0.2.96, Windows ICS = symmetric NAT) gets a fresh external port every match, so the old "one steer per new hole" cost one steer per match and hit the ceiling at ~match 11. At the failed rematch the host was still pinging hole 45011 (open), but the relay handed the new port a FRESH hole 45012 that needed a steer the console ignored.
 - Fix (`pick_hole_port` + `hole_steering`): a new joiner link now REUSES an already-open hole whose occupants are all idle (the host is pinging it, or sent through it <HOLE_DEAD_S ago) with NO steer - rematches happen with everyone back in the lobby, so the old match hole is open and idle and gets reused. Two simultaneously-live joiners still get separate holes (reuse needs all occupants idle, so no crossing). The proactive "spare" steer is now lazy: it fires only when no open hole is already reusable. Loopback sim: 8 rematches with a churning joiner cost 3 steers total instead of ~16. The console ceiling is no longer reached in normal play.
 
 ## 2026-11-05 20:40 - 4 players (3 joiners), SNAKE kicked + DORDOR second player stuck (3 churning NATs)
@@ -96,7 +96,7 @@ same-LAN sessions.
 
 ## Healthy-session baseline (2026-11-06 00:36-01:30, rooms 104-119)
 
-Reference for what a good session looks like. Host 24.68.117.253 (PCSX2, fully port-forwarded); joiner on
+Reference for what a good session looks like. Host 198.18.117.253 (PCSX2, fully port-forwarded); joiner on
 stable PS2 sockets 10071/10072/10073 (no VPN, no port churn). ~11 rooms = 11 map changes / rematches / team
 swaps over ~50 minutes, zero drops.
 

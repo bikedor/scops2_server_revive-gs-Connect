@@ -60,6 +60,14 @@ class SRPHeader:
         flag_list.append(flag.name)
     return flag_list
 
+# Window "tail" this server announces in its SYN+ACK. The game sizes its SRP receive ring from it: 2 x tail slots,
+# indexed by segment number (clSRProtocol::CheckConnectionAck in SC3_ON.ELF), and only accepts a segment whose number is
+# inside that ring. So our segment numbers must wrap at 2 x tail. Without the wrap every segment from 20 on is dropped
+# unacknowledged: on 2026-11-08/09 the last segment a console ever acked was 0x13 in every login, which is the
+# "only ~11 hole steers per login" limit (login uses the first ~9 segments).
+SRP_SERVER_TAIL = 10
+SRP_SEGMENT_WRAP = 2 * SRP_SERVER_TAIL
+
 class SRPWindow:
   """Window data of an SRP segment."""
   def __init__(self, data: bytes):
@@ -171,15 +179,15 @@ class SRPResponse:
     if req is not None and SRPHeaderFlags.SYN.name in req.segment.header.flags:
       flags |= SRPHeaderFlags.SYN.value
     flags = write_u16(flags)
-    seg = write_u16(clt.segment_id)
-    clt.segment_id += 1
+    seg = write_u16(clt.segment_id % SRP_SEGMENT_WRAP)
+    clt.segment_id = (clt.segment_id + 1) % SRP_SEGMENT_WRAP
     ack = write_u16(clt.last_segment)
     header = bytearray(checksum + signature + data_size + flags + seg + ack)
     self.header = SRPHeader(bytes(header))
     # window
     self.window = None
     if window_req:
-      tail = write_u16(10)
+      tail = write_u16(SRP_SERVER_TAIL)
       sender_sig = write_u16(2)
       checksum_init = write_u16(0)
       window_buf_size = write_u16(0x218)
