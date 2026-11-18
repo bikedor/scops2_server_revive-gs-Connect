@@ -6,6 +6,18 @@ It's built on [SPEARTECH/scops2_server_revive](https://github.com/SPEARTECH/scop
 
 This fork adds fixes for the lobby and room list so that real PS2 consoles and PCSX2 players can see each other, join rooms and play full matches. It also adds the online menu's **friend list, game invites and Join Friend**, and a working **ranking** (ranked 2v2 matches with points, levels and a live leaderboard).
 
+## Play now
+
+**The public server is up and tested** (real PS2 consoles and PCSX2 playing each other over the internet, Nov 2026). To join:
+
+1. Use the **US disc** of Splinter Cell: Chaos Theory (SLUS-21137), on a real PS2 or PCSX2 (latest nightly).
+2. In the network settings, set **both DNS entries to `38.49.212.120`** (manual DNS, not automatic).
+   - **Real PS2:** in the game's network setup (Your Network Configuration).
+   - **PCSX2:** Settings -> Network & HDD, DNS 1 and DNS 2 on **Manual**, `38.49.212.120`. See [PCSX2](#pcsx2) and, if DNAS fails, [Troubleshooting](#troubleshooting).
+3. Go online and create an account in the game.
+
+If your internet provider blocks outside DNS, run the SCOPS window (`tools/scopsDNS/SCOPS.exe`) on a PC on the same network: it checks this and can act as a local DNS for the console. Hosting a room works without router setup, but read [wait times without port forwarding](#hosting-a-room-wait-times-without-port-forwarding) first.
+
 ## Status
 
 > **Internet play needs one of two things for whoever hosts a room:** the server's **UDP relay** (`SCCT_RELAY=1`, no router setup, see [UDP relay](#internet-play-without-port-forwarding-udp-relay)) **or port forwarding** on the host's router (see [Port forwarding](#port-forwarding-direct-internet-play)). Players who only *join* never need either. Playing on one LAN needs neither.
@@ -34,6 +46,32 @@ Tested on a LAN with real PS2 consoles (via OPL, and with the original disc) and
 
 Not tested or not supported yet: ranked matches over the internet and ranked 2v2 on the original disc (only unranked "Free" matches were played; unranked games record no stats), reliable long 4-player sessions through the relay (see relay limits), a PCSX2 joiner on a different network, Quick Join on the original disc, a PAL disc, full-room refusal, disconnect/quit penalties in ranked matches, ignore lists and friend-request approval.
 
+## Hosting a room: wait times without port forwarding
+
+Anyone can host a room over the internet with no router setup: the server's relay carries the traffic. What changes is how long players wait, and that depends on the **host's** router. Players who only join never need to change anything.
+
+| Host's router | Joining a room | Coming back after a map ends |
+|---|---|---|
+| UDP 3658 and 10070-10080 forwarded by hand to the console or PCSX2 | quick | quick |
+| UPnP only | quick | often quick; on some routers players still wait as below |
+| No port forwarding, no DMZ | works, through the relay | some players wait about **10-25 seconds** (now and then longer) before they are back in |
+
+**If the host has no port forwarding:**
+
+- **Space the first joins 20-30 seconds apart.** The game gives up on a join after about 5 seconds, and two players arriving at the same moment can both end up on the slow path.
+- **After a map, be patient.** A slow return is the relay opening a new path to the host. Stay on the loading screen; backing out only starts it again.
+- Nothing needs restarting: the wait is the cost of not forwarding, not a fault.
+
+**To make it quick, the host should (best first):**
+
+A Windows helper is included: **`tools/scopsDNS/SCOPS.exe`** (the SCOPS window). It checks whether the SCOPS DNS works from your network, can open these ports by UPnP while it stays open, and opens your router's page plus a port-forward guide for your router's brand. See `tools/scopsDNS/README.md`.
+
+1. **Forward the ports by hand** on the router: UDP **3658** and **10070-10080** to the console's or PCSX2 PC's LAN IP (give that device a fixed IP). Guides for most routers: [portforward.com](https://portforward.com/router.htm). In testing, a manual forward removed the slow returns.
+2. **UPnP** can help on some routers, but on others (an ASUS tested here) the router still closed the unused ports, so players waited anyway.
+3. **DMZ, only as a last resort.** DMZ sends every unrequested connection to one device. Point it at the **console** only, never at a PC you use for anything else, give the console a fixed IP, and turn DMZ off when you finish playing.
+
+ASUS routers: keep hardware acceleration (Runner / Flow Cache) **on**. Turning it off made the host's console stop answering the relay and players were dropped.
+
 ## Internet play without port forwarding (UDP relay)
 
 Game traffic between players is peer to peer: the joiner sends UDP to the host on 3658 and 10070-10080. Normally the **host** must forward those ports. With the relay, the server sits in the middle so the host needs **no router setup**.
@@ -54,6 +92,8 @@ Turn it on in `run_public_test.bat` (already set there):
 | `SCCT_RELAY_HOLES=45001,...,45012` | holes used to steer the host's 3658 socket |
 | `SCCT_RELAY_DUMP=0` | hex-dump N packets per flow for debugging. Leave at 0 in normal use; it grows the log and records traffic |
 | `SCCT_RELAY_ADAPTIVE_STEER=0` | `1` spaces steers one ping cycle apart and stops spending them on hosts that answer without one (off by default, not yet tried in a real session) |
+| `SCCT_DIRECT_HOSTS=name,ip,...` | hosts (account names or IPs, comma separated) whose router really lets outside players in: a DMZ, or UDP 3658 and 10070-10080 forwarded to the console or PCSX2. Their rooms are advertised with their own address and skip the relay, so no steering is used. Opt in only after the ports are verified: a host that merely answers the server is not necessarily reachable by other players. Players on the same home network as such a host need NAT loopback. Not yet tried in a real session |
+| `SCCT_RELAY_STEER_GAME_LIMIT=11` | steers per login after which the relay logs a `HOLE LIMIT` warning (the game ignored every steer after #11 on PS2 and PCSX2 hosts, 2026-11-06..09). Warning only, no behaviour change |
 | `SCCT_RELAY_UNMAP_ON_LEAVE`, `SCCT_RELAY_RESET_ON_JOINER_LEAVE` | forget links when a player leaves the room |
 | `SCCT_AUTO_REGISTER=1` | create an account on first login (off by default; anyone could then create accounts) |
 
@@ -62,7 +102,7 @@ Open these on the **server's** firewall: UDP 3658, 10070-10080, 45000-45012 (`op
 **Known limits**
 
 - **A host can be steered only about 11 times per login.** After that its console ignores further PORT_IDs, and new joiners get a link that never answers (they send, nothing comes back). Joiners that leave and rejoin repeatedly use up steers fast. Workaround: the host fully logs out of the online lobby (or restarts the console) between sessions. A fix that reuses a rejoining player's hole is planned.
-- Joiners should arrive about 30 seconds apart.
+- Joiners should arrive 20-30 seconds apart when the host has no port forwarding (see [wait times](#hosting-a-room-wait-times-without-port-forwarding)).
 - Two players behind the same public IP are not supported through the relay.
 - The log can fill with "joiner IP changes" lines during multi-joiner sessions; rotate logs.
 - `tools/nat_check/` has small probes (`nat_type_probe.py`, `udp_dmz_listen.py`, `udp_dmz_send.py`) to test what kind of NAT a player has.
@@ -83,7 +123,7 @@ Do this on the router of **whoever runs the server** and on the router of **whoe
 
 - Find your own gateway with `ipconfig` (Default Gateway) and use it for PCSX2 and for the router page; do not assume 192.168.1.1.
 - Only one machine on a network can receive the game ports (UDP 3658, 10070-10080) at a time, so only one player per household can host. A player who only **joins** a room does not need to forward anything on their own router.
-- Do not rely on UPnP, and do not use the router's DMZ (it exposes every port on the PC). Forward exactly the ports above.
+- Forward exactly the ports above; it is the reliable option. UPnP works on some routers only. Use the router's DMZ only as a last resort, pointed at the console (never a PC, which would expose every port on it), and turn it off afterwards.
 - A console plugged straight into the modem (no router) needs no forwarding.
 - The server PC's firewall must also allow those ports.
 - Start the server with `run_public_test.bat` (set your public IP in it) so outside players are told your public address instead of your LAN address. See "Hosting from a home PC".
@@ -323,7 +363,7 @@ Earlier attempts with a self-signed certificate (error -610) and with the DNASre
 Notes:
 
 - `dnasrep.exe` is **Windows only**, and it is **not in this repository**: its origin, author and licence are not confirmed. Related public projects that replay captured DNAS packets: [FogNo23/DNASrep](https://github.com/FogNo23/DNASrep) (AGPL-3.0) and forks such as [Sporesirius/DNASrep](https://github.com/Sporesirius/DNASrep). Whether those are the source of the binary used here is unknown.
-- PCSX2 doesn't need DNAS.
+- PCSX2 goes through the same DNAS check as a real PS2, so its DNS must point at the server too (see Troubleshooting).
 - Details of the investigation are in `docs/ONLINE_FIXES.md`.
 
 ## Troubleshooting
@@ -333,6 +373,16 @@ Notes:
 - **"Game is no longer available" when joining:** the host is unreachable from the joiner (client isolation, Sockets mode, firewall) or the room was already closed. From the friend list it can also mean the room has Friend Slots 3 and the friend wasn't invited.
 - **Friend shows as offline:** the friend must be logged in to the same server and be in your friend list on both sides.
 - **"The game is no longer available" only when the other player is on a different network:** on a PCSX2 host, check the gateway (see PCSX2 above, and run `ipconfig` to find yours). Also check that the host's router forwards UDP 3658 and 10070-10080 to the host console or PC.
+- **DNAS fails on PCSX2 (error -601, -612 or similar):**
+  - What the codes mean (from the game's own error text): **-612** no answer from the DNS server, **-611** or **-615** bad DNS answer, **-601** the connection to the DNAS server was dropped, **-610** or **-616** could not connect to DNAS.
+  - Check the settings Chaos Theory actually uses: if the game has its own settings in PCSX2 (right-click it in the game list -> Properties), set the network there; otherwise in the global Settings. One player only got through after his network setup used Chaos Theory's own settings instead of the global ones.
+  - **DNS 1 and DNS 2** on **Manual**, both set to the server's IP. Not **Auto** or **Internal**: those use the PC's DNS or the Hosts table instead.
+  - **Hosts** table: no entries for `dnas.playstation.org`, `ubisoft.com` or `gamespy` (old guides add some that point at other servers).
+  - **Ethernet Device** is the adapter the PC really uses for the internet, not a VPN or virtual adapter.
+  - Quit or uninstall **ZeroTier**, VPNs or other virtual networks while playing: they can carry PCSX2's DNS or traffic elsewhere. One player's -601/-612 went away after removing ZeroTier.
+  - Use the **latest PCSX2 nightly**, the build the testers play on.
+  - Fully close and reopen PCSX2 after any network change.
+  - To check from the server: `logs\dns_53.log` should show the player's public IP asking for `gate1.us.dnas.playstation.org`, and `dnasrep_test\dnasrep_443.log` should then show `POST /us-gw/v2.5_i-connect` from that IP. If the DNS line is missing, the game's DNS is not reaching the server.
 - **Port in use:** the start script stops listeners it knows about; close other programs using ports 53, 80 or 443.
 - **Logs:** everything is in `logs\`. `router_wm_40005.log` is the main one.
 
