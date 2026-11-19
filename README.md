@@ -42,9 +42,9 @@ Tested on a LAN with real PS2 consoles (via OPL, and with the original disc) and
 
 **Internet play (tested):** with the server on a home PC and a real PS2 on another network (and PCSX2 on the server's network), players joined each other's rooms in both directions, played unranked 1v1 matches to the end (Cinema and Station Sabotage), and joined through the Games List, the friend list and game invites. See "Port forwarding" below and "Hosting from a home PC".
 
-**Internet play on a VPS (tested, Nov 2026):** the server runs on a Windows VPS (Servarica) with its public IP as the game DNS. A stock PS2 and PCSX2 on different networks logged in, played unranked 1v1 and 2v2 rooms in both directions, and with the relay on, hosts needed no port forwarding. The relay has known limits, see below.
+**Internet play on a VPS (tested, Nov 2026):** the server runs on a Windows VPS (Servarica) with its public IP as the game DNS. A stock PS2 and PCSX2 on different networks logged in, played unranked 1v1 and 2v2 rooms in both directions, and with the relay on, hosts needed no port forwarding. On 18-19 Nov 2026 a 4-player session ran about 3.5 hours through the relay (a PCSX2 host in Sockets mode over Wi-Fi, PCSX2 joiners on other networks) with **18 ranked 2v2 matches recorded**, every return to the game completed and no server errors. The relay has known limits, see below.
 
-Not tested or not supported yet: ranked matches over the internet and ranked 2v2 on the original disc (only unranked "Free" matches were played; unranked games record no stats), reliable long 4-player sessions through the relay (see relay limits), a PCSX2 joiner on a different network, Quick Join on the original disc, a PAL disc, full-room refusal, disconnect/quit penalties in ranked matches, ignore lists and friend-request approval.
+Not tested or not supported yet: ranked 2v2 on the original disc (ranked over the internet was tested on PCSX2, see above), Quick Join on the original disc, a PAL disc, full-room refusal, disconnect/quit penalties in ranked matches, ignore lists and friend-request approval.
 
 ## Hosting a room: wait times without port forwarding
 
@@ -97,11 +97,14 @@ Turn it on in `run_public_test.bat` (already set there):
 | `SCCT_RELAY_UNMAP_ON_LEAVE`, `SCCT_RELAY_RESET_ON_JOINER_LEAVE` | forget links when a player leaves the room |
 | `SCCT_AUTO_REGISTER=1` | create an account on first login (off by default; anyone could then create accounts) |
 
-Open these on the **server's** firewall: UDP 3658, 10070-10080, 45000-45012 (`open_ports.ps1` does it). Relayed traffic goes through the server, so check your VPS bandwidth allowance.
+Open these on the **server's** firewall: UDP 3658, 10070-10080, 45000-45012 (`open_ports.ps1` does it). Relayed traffic goes through the server, so check your VPS bandwidth allowance (in testing a busy link peaked at about 34 packets and under 4 KB a second).
+
+The relay also has log-only diagnostics (AGE lines for every return, FAIL STEPS, the relay guard and the fair-handout shadow). They never change routing; each one and its switch is listed in [BETA.md](BETA.md).
 
 **Known limits**
 
-- **A host can be steered only about 11 times per login.** After that its console ignores further PORT_IDs, and new joiners get a link that never answers (they send, nothing comes back). Joiners that leave and rejoin repeatedly use up steers fast. Workaround: the host fully logs out of the online lobby (or restarts the console) between sessions. A fix that reuses a rejoining player's hole is planned.
+- **A host's console accepts only about 11 hole steers per login** (it ignores further PORT_IDs). The relay now works around this: rejoining and returning players reuse holes that are already open, the warm-hole rotation keeps idle players' holes alive, and a spare hole is kept ready, so long sessions no longer run out (tested for 3.5 hours with 18 ranked matches). If a host ever does run out, fully logging out of the online lobby resets it.
+- **Hosts without a port forward ("strict")** get slower returns after a map: the console pings only one relay hole every ~25 seconds, so with several joiners coming back at once some wait about 25-35 seconds. They still get in. A forward on the host's router removes the wait.
 - Joiners should arrive 20-30 seconds apart when the host has no port forwarding (see [wait times](#hosting-a-room-wait-times-without-port-forwarding)).
 - Two players behind the same public IP are not supported through the relay.
 - The log can fill with "joiner IP changes" lines during multi-joiner sessions; rotate logs.
@@ -343,9 +346,9 @@ On every client, set the **DNS server manually to the server's IP**.
 
 Details and troubleshooting:
 
-- Use **PCAP Bridged** so the emulated PS2 gets its own LAN address, with a different **PS2 Address** for every instance and the DNS set to the server's IP. Wi-Fi is unreliable (a real PS2 could not join PCSX2 rooms hosted over Wi-Fi), and two Wi-Fi machines may not be able to join each other (check the router for client isolation).
+- Use **PCAP Bridged** so the emulated PS2 gets its own LAN address, with a different **PS2 Address** for every instance and the DNS set to the server's IP. PCAP Bridged over **Wi-Fi** is unreliable (a real PS2 could not join PCSX2 rooms hosted that way), and two Wi-Fi machines on one LAN may not be able to join each other (check the router for client isolation). On Wi-Fi, **Sockets** mode is the better choice; with the relay it can host too.
 - If the server runs on the same PC as PCSX2, do **not** bridge PCSX2 to the adapter carrying the server's IP: the instances then never get past DNAS. What worked: a **second wired adapter** (a cheap USB-to-Ethernet dongle) plugged into the same router and used only for PCSX2. In Windows give the dongle a fixed IPv4 address in the same subnet (for example `192.168.1.250/24`) with **no gateway** and an interface metric of 500 (Advanced, untick automatic metric) so Windows doesn't route normal traffic through it. Removing IPv4 from the dongle entirely makes PCSX2 report "No network adaptor detected". With this setup a real PS2 can join rooms hosted by PCSX2 and the reverse.
-- Sockets mode can join rooms but cannot host, because it reports `192.0.2.100` as its address.
+- **Sockets mode** works for joining, and for **hosting through the server's relay** (tested: a Sockets-mode host on Wi-Fi ran a 3.5-hour, 4-player session). Without the relay a Sockets-mode host cannot be reached, because it reports `192.0.2.100` as its address.
 - **Check your gateway for internet play.** Open **Settings -> Network & HDD -> Ethernet -> Intercept DHCP** and set **Gateway Address** to **your own router's address**, with **Auto** unticked. With Auto, PCSX2 copies the gateway from the Windows adapter it is bridged to. A USB-to-Ethernet adapter set up with no gateway (as described above) therefore gives the PS2 a blank gateway, and the game cannot send anything outside your own subnet. Play on the LAN keeps working, so the problem only shows when someone joins from another network: the joiner sees "The game is no longer available", and a packet capture shows their packets arriving while the PCSX2 console never replies.
   - **Find your own gateway with `ipconfig`:** open Command Prompt, run `ipconfig`, and read the **Default Gateway** line under your main adapter (the one connected to your router, usually Ethernet or Wi-Fi). Use that address. `192.168.1.1` and `192.168.0.1` are common, but yours may differ, so don't copy an address from this README. A bridged adapter that has no gateway shows a blank Default Gateway; use the router's address from your main adapter instead.
   - Restart the game in PCSX2 after changing it. The network settings are only read at startup.
@@ -388,7 +391,7 @@ Notes:
 
 ## Hosting from a home PC (tested)
 
-Internet tests were run with the server on a home PC (behind a consumer router with the forwards above) and a real PS2 on another network. What worked: account creation, login, lobby and room list; joining rooms in both directions (PCSX2 hosting and the PS2 hosting); unranked 1v1 matches (Cinema and Station Sabotage) played to the end; joining through the friend list and game invites; Friend Slots 0, 1 and 2. Not yet tested: ranked matches (stats writes), 4-player games, a PCSX2 joiner on a different network, and a PAL disc.
+Internet tests were run with the server on a home PC (behind a consumer router with the forwards above) and a real PS2 on another network. What worked: account creation, login, lobby and room list; joining rooms in both directions (PCSX2 hosting and the PS2 hosting); unranked 1v1 matches (Cinema and Station Sabotage) played to the end; joining through the friend list and game invites; Friend Slots 0, 1 and 2. Ranked matches, 4-player games and PCSX2 joiners on other networks were later tested on the VPS (see "Hosting on a VPS" and Status); a PAL disc has not been tested.
 
 Start the server with `run_public_test.bat` (copy it, put your public IP in `SCCT_PUBLIC_IP`). It sets:
 
@@ -409,6 +412,7 @@ The server has been run on a **Windows VPS** (Servarica, 38.49.212.120) with thi
 - Install Python 3 (tick "Add to PATH"). The DNAS answer is the Go program `dnasrep.exe` (in `dnasrep_test\`), so **OpenSSL is not needed**: with `SCCT_DNAS_EXTERNAL=1` the start script skips the OpenSSL check and certificate step.
 - Run `SCOPS Server.bat` (it asks for administrator rights) and choose **Internet**. Edit `HostIP`/public IP to the VPS address first, and run `open_ports.ps1` once for the Windows firewall. Also open the same ports in the VPS provider's panel.
 - Keep `state/users.json` and logs out of git (see `.gitignore`). Passwords are stored in plain text.
+- 18-19 Nov 2026: a 4-player session of about 3.5 hours ran here through the relay with 18 ranked 2v2 matches recorded (see Status).
 - For unattended running, use a scheduled task that starts the launcher at boot. A weekly reboot is optional.
 
 ## Hosting on the Internet
@@ -419,7 +423,7 @@ A small VPS (1 vCPU, 1–2 GB RAM) is enough for the Python services. Internet p
 - The NAT service reports the address it observes (or the public IP with `SCCT_NAT_PUBLIC_ADDR=1` for LAN players). A real PS2 behind a different network reaching a PCSX2 host worked in the home test; two consoles both behind home routers have not been tried.
 - DNS for outside clients is answer-only: it answers the game's override hostnames and refuses everything else, so it is not an open resolver. Bots still probe ports 53 and 80 within hours.
 - `state/users.json` stores passwords in plain text. Hash them (or at least keep the file private and out of git) before the server is public.
-- Open only the ports listed under "Port forwarding". Don't use a router DMZ.
+- Open only the ports listed under "Port forwarding". Never put the server PC in a router DMZ; for players, DMZ is only a last resort, for a console (see "Hosting a room").
 - Trim or rotate logs, since they contain players' IP addresses.
 - Players who host rooms need UDP 3658 and 10070-10080 forwarded on their own router, unless the relay is on (see "UDP relay" and "Port forwarding").
 
