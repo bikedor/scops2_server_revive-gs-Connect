@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.8
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.11
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -535,7 +535,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.8 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.11 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -1205,11 +1205,13 @@ function Start-ScopsDns {
                         $dnsBtn.Visible = $false
                         $dnsIcon.Invalidate()
                     }
-                    elseif ($line -match "Could not get a SCOPS answer") {
-                        $script:DnsState = "bad"
-                        $dnsHead.Text = "SCOPS DNS did not answer"
-                        $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(180, 25, 35)
-                        $dnsDetail.Text = "This PC could not get 38.49.212.120 back from the SCOPS DNS. Use local DNS."
+                    elseif ($line -match "PC DNS filter") {
+                        $script:DnsState = "warn"
+                        $dnsHead.Text = "Something else answers DNS here"
+                        $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(160, 100, 0)
+                        $dnsAddr.Text = "Put this in the PS2, both DNS entries:  38.49.212.120"
+                        $dnsDetail.Text = "The check was answered by something on this PC or your network (a VPN, antivirus, DNS filter, or your provider). " +
+                            "The PS2 may still work: put 38.49.212.120 in the console first. If the game does not get online (DNAS error), use local DNS."
                         $dnsBtn.Visible = $true
                         $dnsIcon.Invalidate()
                     }
@@ -1217,11 +1219,27 @@ function Start-ScopsDns {
                         $script:DnsState = "bad"
                         $why = ""
                         if ($line -match "detected:\s*(.+?), not ") { $why = $Matches[1] + ". " }
-                        $dnsHead.Text = "DNS looks redirected on this PC"
+                        $dnsHead.Text = "DNS is being redirected"
                         $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(180, 25, 35)
-                        $dnsDetail.Text = "SCOPS did not answer this PC's DNS check: " + $why +
-                            "If your PS2 already gets online with 38.49.212.120, ignore this (often a VPN, antivirus or DNS filter on this PC). " +
-                            "If it does not, use local DNS."
+                        $dnsDetail.Text = "SCOPS did not answer the check: " + $why +
+                            "A PS2 set to 38.49.212.120 will not work from this network. Use local DNS."
+                        $dnsBtn.Visible = $true
+                        $dnsIcon.Invalidate()
+                    }
+                    elseif ($line -match "server itself is reachable") {
+                        $script:DnsState = "warn"
+                        $dnsHead.Text = "Check again in a minute"
+                        $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(160, 100, 0)
+                        $dnsAddr.Text = "Put this in the PS2, both DNS entries:  38.49.212.120"
+                        $dnsDetail.Text = "The SCOPS server is reachable (it refused a test name, as it should), but a game name did not come back. Try the check again. You can still put 38.49.212.120 in the PS2."
+                        $dnsBtn.Visible = $true
+                        $dnsIcon.Invalidate()
+                    }
+                    elseif ($line -match "Could not get a SCOPS answer") {
+                        $script:DnsState = "bad"
+                        $dnsHead.Text = "SCOPS DNS did not answer"
+                        $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(180, 25, 35)
+                        $dnsDetail.Text = "This PC could not get 38.49.212.120 back from the SCOPS DNS. Use local DNS."
                         $dnsBtn.Visible = $true
                         $dnsIcon.Invalidate()
                     }

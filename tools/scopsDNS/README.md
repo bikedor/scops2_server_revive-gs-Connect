@@ -1,4 +1,4 @@
-# scopsDNS 2.1 / SCOPS window V8.8
+# scopsDNS 2.1 / SCOPS window V8.11
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
@@ -21,6 +21,23 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.11
+- Red ("DNS is being redirected") now also when your **router** answers DNS itself (a reply from another home-network address): the PS2 sits behind the same router, so it is affected too.
+- Amber ("Something else answers DNS here") when the reply comes from this PC, is forged in the SCOPS server's name, or even 192.0.2.1 answers. From the PC alone that can be a program on the PC or your provider, so the window says: put 38.49.212.120 in the PS2 first, and use local DNS only if the game does not get online.
+- Wrong answers no longer show as "SCOPS DNS did not answer"; that headline is now only for no reply at all.
+
+## What changed in V8.10
+- A red "DNS is being redirected" now means a query sent to the SCOPS server was answered by another internet DNS server. That is when a PS2 set to 38.49.212.120 will not work, and local DNS is the fix.
+- A reply from this PC (a VPN, antivirus or DNS filter) or an answer to the 192.0.2.1 canary is amber, "This PC filters DNS". Put 38.49.212.120 in the PS2 first. Use local DNS only if the game does not get online.
+- If the SCOPS server refuses a test name but a game name did not come back, the window says to try again instead of calling it a hijack.
+
+## What changed in V8.9
+- If the normal DNS check fails, three extra checks find out why:
+  - a DNS question to 192.0.2.1 (an address where no DNS server can exist): any reply means every DNS question on this network or PC is being answered on the way;
+  - a made-up name sent to the SCOPS DNS: the real server refuses it, so any other answer means another DNS server answered instead;
+  - "who are you" (version.bind / id.server): the answering server often names itself, and the window shows that name.
+- Headline is now "DNS is being redirected", with the reason. If the server itself is reachable but the check failed, it says to try again instead.
 
 ## What changed in V8.8
 - DNS check: tries up to 3 times (two names) and only says "redirected" when two answers are both wrong, so one lost packet no longer shows red.

@@ -512,6 +512,198 @@ FAIL_LOG = os.environ.get("SCCT_RELAY_FAIL_LOG", "1").strip().lower() not in ("0
 NAT_STALL_S = float(os.environ.get("SCCT_RELAY_NAT_STALL_S", "10"))   # PORT_ID sent, no ping this long = stalled
 def _env_on(name: str, default: str) -> bool:
     return os.environ.get(name, default).strip().lower() not in ("0", "off", "false", "no", "")
+# ---- Relay guard (SCCT_RELAY_GUARD_LOG, default OFF; LOG ONLY: nothing is ever dropped or changed) ----
+# Data for a possible later flood limit (an idea from tubisoft's 187 relay: a per-player packet-rate cap and a packet size
+# cap). Before any limit could be safe we need the real peaks, above all at map loads, revenge swaps and back to the
+# lobby, where the game sends its bursts. For every relayed link (joiner -> host and host -> joiner, per hole) it keeps the
+# busiest 1-second window (packets and bytes) and the largest packet, and logs:
+#   GUARD would-limit: <link> sent N pkt in 1 s (limit L)       first time a link passes SCCT_RELAY_GUARD_PPS in a window
+#   GUARD would-limit: <link> packet of N B (limit L)            first packet larger than SCCT_RELAY_GUARD_MAX_PKT
+#   GUARD peaks (last 10 min): ...                               every SCCT_RELAY_GUARD_SUMMARY_S, busiest links first
+#   GUARD unmapped senders (last 10 min): ...                    packets to relay ports from IPs the lobby never mapped
+# ("Only relay for signed-in players" is already how the relay works: a joiner IP is only forwarded after the lobby server
+# maps it when that player joins a room, and unmapped IPs are dropped. The unmapped-sender count shows whether anyone is
+# poking the relay ports.) Repeated would-limit lines for one link are limited to one a minute.
+GUARD_LOG = _env_on("SCCT_RELAY_GUARD_LOG", "0")
+GUARD_PPS = int(os.environ.get("SCCT_RELAY_GUARD_PPS", "300"))
+GUARD_MAX_PKT = int(os.environ.get("SCCT_RELAY_GUARD_MAX_PKT", "1472"))
+GUARD_SUMMARY_S = float(os.environ.get("SCCT_RELAY_GUARD_SUMMARY_S", "600"))
+GUARD_LINKS = {}       # key -> {"who", "sec", "n", "b", "pk_n", "pk_b", "pk_at", "big", "tot", "over", "warn_t"}
+GUARD_UNMAPPED = {}    # ip -> [packets, bytes]
+_GUARD_LAST = [0.0]
+_GUARD_ERR = []
+
+
+def guard_count(key, who: str, size: int, now: float) -> None:
+    """Count one forwarded packet for a link. Log only; never raises."""
+    if not GUARD_LOG:
+        return
+    try:
+        g = GUARD_LINKS.get(key)
+        if g is None:
+            g = GUARD_LINKS[key] = {"who": who, "sec": -1, "n": 0, "b": 0, "pk_n": 0, "pk_b": 0, "pk_at": "",
+                                    "big": 0, "tot": 0, "over": 0, "warn_t": -1e9}
+        sec = int(now)
+        if sec != g["sec"]:
+            g["sec"], g["n"], g["b"] = sec, 0, 0
+        g["n"] += 1
+        g["b"] += size
+        g["tot"] += 1
+        if g["n"] > g["pk_n"]:
+            g["pk_n"], g["pk_at"] = g["n"], now_ts()
+        g["pk_b"] = max(g["pk_b"], g["b"])
+        over = None
+        if g["n"] == GUARD_PPS + 1:
+            over = f"sent {g['n']} pkt in 1 s (limit {GUARD_PPS})"
+        if size > GUARD_MAX_PKT and size > g["big"]:
+            over = f"packet of {size} B (limit {GUARD_MAX_PKT})"
+        g["big"] = max(g["big"], size)
+        if over:
+            g["over"] += 1
+            if now - g["warn_t"] >= 60:
+                g["warn_t"] = now
+                log(f"GUARD would-limit: {who} {over} (log only, nothing dropped)")
+    except Exception as e:  # logging must never affect forwarding
+        if not _GUARD_ERR:
+            _GUARD_ERR.append(e)
+            log(f"GUARD error (logging off from here): {e!r}")
+
+
+def guard_unmapped(ip: str, size: int) -> None:
+    if not GUARD_LOG:
+        return
+    try:
+        u = GUARD_UNMAPPED.setdefault(ip, [0, 0])
+        u[0] += 1
+        u[1] += size
+    except Exception:
+        pass
+
+
+def guard_tick(now: float) -> None:
+    """Every GUARD_SUMMARY_S: the busiest links of the period, then reset the period's peaks."""
+    if not GUARD_LOG or _GUARD_ERR:
+        return
+    if _GUARD_LAST[0] == 0.0:
+        _GUARD_LAST[0] = now
+        return
+    if now - _GUARD_LAST[0] < GUARD_SUMMARY_S:
+        return
+    try:
+        mins = (now - _GUARD_LAST[0]) / 60.0
+        _GUARD_LAST[0] = now
+        busy = sorted(GUARD_LINKS.values(), key=lambda g: -g["pk_n"])
+        if busy:
+            top = "; ".join(f"{g['who']}: peak {g['pk_n']} pkt/s ({g['pk_b'] / 1024:.1f} KB/s) at {g['pk_at']}, "
+                            f"largest {g['big']} B, {g['tot']} pkt" + (f", would-limit x{g['over']}" if g["over"] else "")
+                            for g in busy[:6])
+            log(f"GUARD peaks (last {mins:.0f} min, {len(busy)} links, limits {GUARD_PPS} pkt/s and {GUARD_MAX_PKT} B, "
+                f"log only): {top}")
+        if GUARD_UNMAPPED:
+            worst = sorted(GUARD_UNMAPPED.items(), key=lambda kv: -kv[1][0])
+            log(f"GUARD unmapped senders (last {mins:.0f} min): {len(worst)} IPs, {sum(v[0] for _, v in worst)} packets "
+                f"dropped as before; top: " + ", ".join(f"{ip} {v[0]} pkt" for ip, v in worst[:5]))
+        GUARD_LINKS.clear()
+        GUARD_UNMAPPED.clear()
+    except Exception as e:
+        _GUARD_ERR.append(e)
+        log(f"GUARD error (logging off from here): {e!r}")
+
+
+# ---- Fair-handout shadow (SCCT_RELAY_FAIR_SHADOW, default OFF; LOG ONLY: no decision changes) ----
+# 2026-11-19 (STRIDERSTROKE strict host, three joiners): at 00:36:02 the hole the relay had been keeping warm for DORIAN_D's
+# lobby socket (45001) was handed to SNAKE's link, which arrived 0.1 s earlier; DORIAN_D then waited for a new steer. A
+# "fair rule" would give a warmed hole only to the player it was warmed for. Before building that, these lines count how
+# often it happens and what it costs:
+#   FAIR shadow: hole H kept warm for <owner> (warm steer Ns ago) went to <taker>; fair rule would give <taker> <alt>
+#   FAIR shadow: <owner> back Ns after its warm hole H went to <taker>: now on hole X (<why>)     (its AGE line has the wait)
+#   FAIR summary (last 10 min): warm holes taken by another player N, owners back M (held/slow K), ...
+FAIR_SHADOW = _env_on("SCCT_RELAY_FAIR_SHADOW", "0")
+FAIR_WARM_S = float(os.environ.get("SCCT_RELAY_FAIR_WARM_S", "120"))      # a warm steer this recent marks the hole as kept
+FAIR_BACK_S = float(os.environ.get("SCCT_RELAY_FAIR_BACK_S", "120"))      # owner back within this long counts as affected
+FAIR_SUMMARY_S = float(os.environ.get("SCCT_RELAY_FAIR_SUMMARY_S", "600"))
+FAIR_WARM_FOR = {}     # (host, hole) -> (endpoint, t of the warm steer)
+FAIR_TAKEN = {}        # (host, owner endpoint) -> (t, hole, taker endpoint)
+FAIR_STATS = {"taken": 0, "back": 0, "back_slow": 0, "alt": 0}
+_FAIR_LAST = [0.0]
+_FAIR_ERR = []
+
+
+def _fair_safe(fn):
+    def run(*a, **k):
+        if not FAIR_SHADOW or _FAIR_ERR:
+            return None
+        try:
+            return fn(*a, **k)
+        except Exception as e:  # logging must never affect routing
+            _FAIR_ERR.append(e)
+            log(f"FAIR shadow error (logging off from here): {e!r}")
+            return None
+    return run
+
+
+@_fair_safe
+def fair_warm_steer(host: str, port: int, ep, now: float) -> None:
+    FAIR_WARM_FOR[(host, port)] = (ep, now)
+
+
+@_fair_safe
+def fair_reuse(host: str, port: int, ep, popped: list, alts: list, now: float) -> None:
+    """A new link took an open hole and dropped its idle occupants. If one of them is another player's endpoint the relay
+    was keeping this hole warm for, note what a fair rule would have done instead."""
+    w = FAIR_WARM_FOR.get((host, port))
+    if w is None or now - w[1] > FAIR_WARM_S:
+        return
+    owner = w[0]
+    if owner not in popped or owner[0] == ep[0]:
+        return
+    alt = next((pt for pt in alts if pt != port and (FAIR_WARM_FOR.get((host, pt)) is None
+                                                      or now - FAIR_WARM_FOR[(host, pt)][1] > FAIR_WARM_S
+                                                      or FAIR_WARM_FOR[(host, pt)][0][0] == ep[0])), None)
+    FAIR_TAKEN[(host, owner)] = (now, port, ep)
+    FAIR_STATS["taken"] += 1
+    if alt is not None:
+        FAIR_STATS["alt"] += 1
+    log(f"FAIR shadow: hole {port} kept warm for {_who(owner[0])}:{owner[1]} (warm steer {now - w[1]:.0f}s ago) went to "
+        f"{_who(ep[0])}:{ep[1]}; fair rule would give {_who(ep[0])} "
+        + (f"open hole {alt} instead" if alt is not None else "a steered/spare hole instead (no other open hole)")
+        + " (log only)")
+
+
+@_fair_safe
+def fair_back(host: str, ep, port: int, why: str, now: float) -> None:
+    t = FAIR_TAKEN.pop((host, ep), None)
+    if t is None or now - t[0] > FAIR_BACK_S:
+        return
+    slow = not why.startswith(("reuses open hole", "ready", "shares the hole"))
+    FAIR_STATS["back"] += 1
+    if slow:
+        FAIR_STATS["back_slow"] += 1
+    log(f"FAIR shadow: {_who(ep[0])}:{ep[1]} back {now - t[0]:.1f}s after its warm hole {t[1]} went to "
+        f"{_who(t[2][0])}:{t[2][1]}: now on hole {port} ({why})" + (" - likely a slow return" if slow else "") + " (log only)")
+
+
+@_fair_safe
+def fair_tick(now: float) -> None:
+    if _FAIR_LAST[0] == 0.0:
+        _FAIR_LAST[0] = now
+        return
+    if now - _FAIR_LAST[0] < FAIR_SUMMARY_S:
+        return
+    mins = (now - _FAIR_LAST[0]) / 60.0
+    _FAIR_LAST[0] = now
+    st = FAIR_STATS
+    if st["taken"] or st["back"]:
+        log(f"FAIR summary (last {mins:.0f} min, log only): warm holes taken by another player {st['taken']} "
+            f"(another open hole was free for the taker {st['alt']}), owners back within {FAIR_BACK_S:.0f}s {st['back']}, "
+            f"of them on a hole that needed a steer/hold (likely slow) {st['back_slow']}")
+    for k in st:
+        st[k] = 0
+    for k, v in list(FAIR_TAKEN.items()):
+        if now - v[0] > FAIR_BACK_S:
+            FAIR_TAKEN.pop(k, None)
+
+
 # Leave grace (SCCT_RELAY_LEAVE_GRACE, default on). GROUP_LEAVE used to forget all of a player's links at once. A link the
 # PS2 was still sending on (its goodbye, or heartbeats for a second or two) was then treated as a NEW link and put on
 # another hole, so the host saw the same player from a second address mid-conversation. 2026-11-13 05:29:16: that froze
@@ -1236,6 +1428,7 @@ def relay_from_joiner(sock: socket.socket, data: bytes, addr: tuple[str, int], n
     """Datagram from an outside joiner on a relay port -> host:3658 from 45000."""
     ent = RELAY_MAP.get(addr[0])
     if ent is None:
+        guard_unmapped(addr[0], len(data))
         if addr[0] not in RELAY_UNMAPPED_LOGGED:
             RELAY_UNMAPPED_LOGGED.add(addr[0])
             log(f"RELAY drop: {len(data)}B on :{sock.getsockname()[1]} from {addr[0]}:{addr[1]} - no mapping from the lobby server (logged once)")
@@ -1337,6 +1530,7 @@ def relay_from_joiner(sock: socket.socket, data: bytes, addr: tuple[str, int], n
             log(f"RELAY host {host}: hole {src_port} -> external port {hport}" + ("" if src_port in ext else " (not yet observed on this hole; guessing)"))
     try:
         src_sock.sendto(data, (host, hport))
+        guard_count(("J", addr, src_port), f"{_who(addr[0])}:{addr[1]} -> host {host} (hole {src_port})", len(data), now)
         if RELAY_HOLES:
             RELAY_TRAFFIC.setdefault(host, {})[src_port] = now
             pool_sent(host, src_port, now)
@@ -1397,6 +1591,7 @@ def relay_from_host(data: bytes, addr: tuple[str, int], now: float, nat_port: in
         log(f"RELAY DUMP H->J {addr[0]}:{addr[1]} -> {dest[0]}:{dest[1]} {len(data)}B: {data[:64].hex(' ')}")
     try:
         dsock.sendto(data, dest)
+        guard_count(("H", addr[0], nat_port, dest), f"host {_who(addr[0])} (hole {nat_port}) -> {dest[0]}:{dest[1]}", len(data), now)
         hv.setdefault("ep_tx", {})[dest] = hv.setdefault("ep_tx", {}).get(dest, 0) + 1
         if AGE_PENDING and RELAY_HOLES and nat_port in RELAY_HOLES:
             rec = AGE_PENDING.pop((addr[0], dest), None)
@@ -2102,6 +2297,7 @@ def warm_pick(clt, hv: dict, traffic: dict, now: float):
         return None, ""
     age, port, ep, idle = max(cands)
     clt.warm_prev = True
+    fair_warm_steer(host, port, ep, now)
     return port, (f"warm: {ep[0]}:{ep[1]} idle {idle:.0f}s, host silent on {port} " +
                   ("(never opened)" if age >= 1e9 else f"for {age:.0f}s"))
 
@@ -2575,8 +2771,11 @@ def pick_hole_port(hv: dict, ep, now: float, prev_t=None, host: str = None) -> i
         if reusable:
             reusable.sort(reverse=True)   # prefer the ping target, then the most recently open
             port = reusable[0][3]
-            for e in occupants(port):      # drop the stale idle occupant(s); the new link owns the hole now
+            popped = occupants(port)
+            for e in popped:               # drop the stale idle occupant(s); the new link owns the hole now
                 src.pop(e, None); probes.discard(e)
+            if FAIR_SHADOW and host:
+                fair_reuse(host, port, ep, popped, [r[3] for r in reusable[1:]], now)
             why = "reuses open hole the host is pinging" if reusable[0][0] else f"reuses open hole (host sent {now - reusable[0][2]:.0f}s ago)"
             if strict_h and not reusable[0][0] and pool_alive(host, port, now):
                 why = f"ready spare, kept open by keepalives (host sent {now - reusable[0][2]:.0f}s ago)"
@@ -2597,6 +2796,8 @@ def pick_hole_port(hv: dict, ep, now: float, prev_t=None, host: str = None) -> i
             why = f"all {len(RELAY_HOLES)} holes in use, taken over from {lru[0]}:{lru[1]} (idle {idle:.0f}s)"
     src[ep] = port
     log(f"RELAY host {host}: joiner link {ep[0]}:{ep[1]} <-> host:{RELAY_HOST_PORT} via hole port {port} ({why})")
+    if FAIR_SHADOW and host:
+        fair_back(host, ep, port, why, now)
     return port
 
 
@@ -2746,6 +2947,11 @@ def main(argv=None) -> int:
             if UPNP_PROBE and UPNP_HINT else "off"))
         log(f"  UPNP HINT: " + ("on - scopsDNS {\"op\":\"upnp_open\"} datagrams are logged and never relayed to a player"
             if UPNP_HINT else "off"))
+        log(f"  FAIR SHADOW: " + (f"on (log only) - counts warm holes handed to another player's link and what that owner "
+            f"then waited ('FAIR shadow' lines, summary every {FAIR_SUMMARY_S:.0f}s)" if FAIR_SHADOW else "off"))
+        log(f"  RELAY GUARD: " + (f"on (log only, nothing dropped) - per-link peak packets/s and largest packet, 'would-limit' "
+            f"lines above {GUARD_PPS} pkt/s or {GUARD_MAX_PKT} B, summary every {GUARD_SUMMARY_S:.0f}s, unmapped senders counted"
+            if GUARD_LOG else "off"))
         log(f"  FAIL STEPS: " + (f"on (log only) - NAT step lines (a socket stuck {NAT_STALL_S:.0f}s at PORT_ID), FAIL why on "
             f"no-reply moves, avoided holes on AGE lines, evidence on address-restricted" if FAIL_LOG else "off"))
         if WAKE_MOVE:
@@ -2772,6 +2978,10 @@ def main(argv=None) -> int:
             if not any(o.addr == c.addr for o in CLIENTS) and c.addr not in RELAY_HOSTS:
                 for d in (HOST_TRAFFIC, HOST_EXT, HOST_EXT_LOCK, RELAY_TRAFFIC, KA_STATE, HOST_DATA, BAD_HOLES):
                     d.pop(c.addr, None)
+        if GUARD_LOG:
+            guard_tick(now)
+        if FAIR_SHADOW:
+            fair_tick(now)
         if RELAY_HOSTS:
             relay_expire(now)
             link_summary(now)

@@ -361,6 +361,20 @@ shadow would-lines, log only).
 behaves as before (both false opens reproduced). Whole suite on and off: identical to the previous run except this
 scenario's own lines.
 
+### Fair-handout shadow (2026-11-19, log only)
+`sc_fair_shadow_log_only`: replays STRIDERSTROKE's 00:36:02 return. The host pings 45001, kept warm for DORIAN_D's idle
+lobby socket; SNAKE's lobby socket arrives first and takes it (as live), DORIAN_D's arrives 0.1 s later and gets a free
+hole that needs a steer. With `SCCT_RELAY_FAIR_SHADOW` on, the chosen holes are the same as with it off (45001, 45002),
+and the lines appear: hole taken, the owner back "likely a slow return", and the summary. The failure-steps session also
+routes identically on and off.
+
+### Relay guard (2026-11-18, log only)
+`sc_guard_log_only`: the failure-steps session (three joins, two map loads with bursts, a no-reply move) with
+`SCCT_RELAY_GUARD_LOG` off, on (300 pkt/s), and on with an absurd 3 pkt/s limit. Routing lines and deliveries must be
+identical in all three; with 3 pkt/s the `GUARD would-limit` lines appear (66), with 300 none; packets from an IP the lobby
+never mapped are counted in `GUARD unmapped senders` and still dropped. The simulated links peak at 5 pkt/s: real numbers
+come from the live log's `GUARD peaks` lines.
+
 ### Host lost its NAT session (2026-11-17, log only)
 
 `sc_host_nat_lost_log`: a hosting console (COOLDOR, one player mapped, game data 1 s ago) closes its NAT session -> one

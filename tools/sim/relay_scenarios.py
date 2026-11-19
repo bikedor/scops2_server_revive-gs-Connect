@@ -1636,6 +1636,134 @@ def sc_fail_steps_log_only(new):
 SCENARIOS.append(sc_fail_steps_log_only)
 
 
+def _guard_world(on, pps=300):
+    """The FAIL-steps session (three joins, two map loads with bursts, a no-reply move) with the relay guard on or off."""
+    orig = World.__init__
+    w_holder = {}
+
+    def init(self, *a, **k):
+        orig(self, *a, **k)
+        self.mod.GUARD_LOG = on
+        self.mod.GUARD_PPS = pps
+        self.mod.GUARD_LINKS.clear()
+        self.mod.GUARD_UNMAPPED.clear()
+        w_holder["w"] = self
+    World.__init__ = init
+    try:
+        w, logs = _fail_world(True)
+    finally:
+        World.__init__ = orig
+    return w, logs
+
+
+def sc_guard_log_only(new):
+    """2026-11-18 - relay guard (idea from tubisoft's 187 relay: per-player packet-rate and packet-size caps). Log only: with
+    SCCT_RELAY_GUARD_LOG on, even with an absurdly low limit (3 pkt/s), routing and deliveries must be exactly the same as
+    with it off; the would-limit and peak lines must appear; unmapped senders are counted and still dropped."""
+    w_off, logs_off = _guard_world(False)
+    w_on, logs_on = _guard_world(True)
+    w_low, logs_low = _guard_world(True, pps=3)
+    strip = lambda L: [(t, m) for t, m in _routing_lines(L) if not m.startswith("GUARD")]
+    same = (strip(logs_on) == strip(logs_off) and strip(logs_low) == strip(logs_off)
+            and w_on.deliveries == w_off.deliveries and w_low.deliveries == w_off.deliveries)
+    off_lines = [m for _, m in logs_off if m.startswith("GUARD")]
+    would = [m for _, m in logs_low if m.startswith("GUARD would-limit")]
+    would_normal = [m for _, m in logs_on if m.startswith("GUARD would-limit")]
+    mod = w_low.mod
+    peaks = max((g["pk_n"] for g in mod.GUARD_LINKS.values()), default=0)
+    n0 = len(SIM.logs)
+    import types
+    fake = types.SimpleNamespace(getsockname=lambda: ("0.0.0.0", 45003))
+    mod.relay_from_joiner(fake, b"x" * 40, ("198.18.250.7", 5555), SIM.t)    # never mapped by the lobby
+    mod.relay_from_joiner(fake, b"x" * 40, ("198.18.250.7", 5555), SIM.t)
+    mod._GUARD_LAST[0] = SIM.t - mod.GUARD_SUMMARY_S - 1
+    mod.guard_tick(SIM.t)
+    summ = [m for _, m in SIM.logs[n0:] if m.startswith("GUARD ")]
+    unm = [m for m in summ if m.startswith("GUARD unmapped") and "198.18.250.7 2 pkt" in m]
+    pk = [m for m in summ if m.startswith("GUARD peaks")]
+    ok = same and not off_lines and bool(would) and not would_normal and bool(unm) and bool(pk) if new else True
+    return ok, (f"routing and deliveries identical off / on / on with 3 pkt/s limit: {'yes' if same else 'NO'}; "
+                f"would-limit lines at 3 pkt/s {len(would)}, at 300 pkt/s {len(would_normal)}; busiest link {peaks} pkt/s; "
+                f"guard lines with it off {len(off_lines)}; unmapped sender counted: {'yes' if unm else 'NO'}"
+                + (f"\n      e.g. {would[0][:200]}" if would else "") + (f"\n      e.g. {pk[0][:240]}" if pk else ""))
+
+
+SCENARIOS.append(sc_guard_log_only)
+
+
+def _fair_state(on):
+    """Tonight's 00:36:02 moment: the host pings 45001, which the relay kept warm for DORIAN_D's idle lobby socket; SNAKE's
+    lobby socket arrives 0.1 s before DORIAN_D's."""
+    global SIM
+    SIM = Sim()
+    mod = load_relay()
+    mod.log = lambda m: SIM.logs.append((SIM.t, m))
+    mod.FAIR_SHADOW = on
+    mod.FAIR_WARM_FOR.clear(); mod.FAIR_TAKEN.clear()
+    mod.HOLD_MODE = "off"
+    mod.RELAY_HOLES = list(range(45001, 45013))
+    t = 5000.0
+    c = Clt(); c.hole_target, c.hole_last, c.last_seen = 45001, t - 13, t
+    mod.CLIENTS.append(c)
+    mod.HOST_TRAFFIC[HOST] = {45001: t - 13, 45003: t - 0.5, 45006: t - 0.3}
+    mod.HOST_DATA[HOST] = {45001: t - 820, 45003: t - 6, 45006: t - 6}
+    owner, taker = (DORIAN, 10072), (THIRD, 10072)
+    hv = {"joiner": (THIRD, 10071), "sock": None, "rx": 0, "tx": 0, "last": t, "first": t - 3000,
+          "eps": {owner: (None, t - 821), taker: (None, t - 837), (THIRD, 10071): (None, t - 0.2), (DORIAN, 10071): (None, t - 0.3)},
+          "src": {owner: 45001, (THIRD, 10071): 45003, (DORIAN, 10071): 45006}}
+    mod.RELAY_HOSTS[HOST] = hv
+    mod.RELAY_MAP[DORIAN] = {"host": HOST, "user": "DORIAN_D"}
+    mod.RELAY_MAP[THIRD] = {"host": HOST, "user": "SNAKE"}
+    mod.fair_warm_steer(HOST, 45001, owner, t - 20)
+    a = mod.pick_hole_port(hv, taker, t, None, HOST)
+    hv["eps"][taker] = (None, t)                        # SNAKE's link is now live on 45001
+    b = mod.pick_hole_port(hv, owner, t + 0.1, None, HOST)
+    mod._FAIR_LAST[0] = t - mod.FAIR_SUMMARY_S - 1
+    mod.fair_tick(t + 1)
+    return (a, b), [m for _, m in SIM.logs]
+
+
+def sc_fair_shadow_log_only(new):
+    """2026-11-19 - fair-handout shadow (log only). Replays STRIDERSTROKE's 00:36:02 return: SNAKE's lobby link takes the
+    hole kept warm for DORIAN_D. With SCCT_RELAY_FAIR_SHADOW on, the same holes must be chosen as with it off, and the
+    FAIR lines must name the taken hole, the owner's return and the summary; a full session must route identically."""
+    (on_ports, on_logs), (off_ports, off_logs) = _fair_state(True), _fair_state(False)
+    strip = lambda L: [m for m in L if not m.startswith("FAIR")]
+    same_pick = on_ports == off_ports and strip(on_logs) == strip(off_logs)
+    took = [m for m in on_logs if m.startswith("FAIR shadow: hole 45001 kept warm for DORIAN_D")]
+    back = [m for m in on_logs if m.startswith("FAIR shadow: DORIAN_D") and "back 0.1s" in m]
+    summ = [m for m in on_logs if m.startswith("FAIR summary") and "taken by another player 1" in m]
+    off_lines = [m for m in off_logs if m.startswith("FAIR")]
+    # a whole session (three joins, two map loads, a no-reply move) routes the same with it on and off
+    orig = World.__init__
+    def mk(flag):
+        def init(self, *a, **k):
+            orig(self, *a, **k)
+            self.mod.FAIR_SHADOW = flag
+            self.mod.FAIR_WARM_FOR.clear(); self.mod.FAIR_TAKEN.clear()
+        return init
+    World.__init__ = mk(True)
+    try:
+        w1, l1 = _fail_world(True)
+    finally:
+        World.__init__ = orig
+    World.__init__ = mk(False)
+    try:
+        w0, l0 = _fail_world(True)
+    finally:
+        World.__init__ = orig
+    st = lambda L: [(t, m) for t, m in _routing_lines(L) if not m.startswith("FAIR")]
+    same_run = st(l1) == st(l0) and w1.deliveries == w0.deliveries
+    ok = same_pick and same_run and bool(took) and bool(back) and bool(summ) and not off_lines if new else True
+    return ok, (f"same holes on/off: {'yes' if same_pick else 'NO'} ({on_ports}); whole session identical: "
+                f"{'yes' if same_run else 'NO'}; taken line {len(took)}, owner-back line {len(back)}, summary {len(summ)}, "
+                f"lines with it off {len(off_lines)}" + (f"\n      e.g. {took[0][:230]}" if took else "")
+                + (f"\n      e.g. {back[0][:230]}" if back else ""))
+
+
+SCENARIOS.append(sc_fair_shadow_log_only)
+
+
 def _verdict_mod(strict):
     global SIM
     SIM = Sim()

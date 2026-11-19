@@ -126,6 +126,15 @@ rem map load never counts as proof of open (whichever came first), and 2 clean a
 rem called open. It can only keep a host unknown/strict longer; strict detection, holds and the spare are unchanged.
 rem Turn on between sessions: set to 1 and restart the server.
 set SCCT_RELAY_OPEN_STRICT=1
+rem Relay guard (log only, nothing is dropped): per-link peak packets/s and largest packet, "GUARD would-limit" lines above
+rem the limits below, a "GUARD peaks" summary every 10 min, and a count of unmapped senders. Data for a possible flood limit.
+set SCCT_RELAY_GUARD_LOG=1
+set SCCT_RELAY_GUARD_PPS=300
+set SCCT_RELAY_GUARD_MAX_PKT=1472
+rem Fair-handout shadow (log only, nothing changes): 'FAIR shadow' lines when a hole the relay kept warm for one player
+rem goes to another player's link, what the owner then got, and a 'FAIR summary' every 10 min. Data for a possible
+rem fair rule (warm holes only for the player they were warmed for).
+set SCCT_RELAY_FAIR_SHADOW=1
 rem Game check at login: only these games may log in (product id prefixes, comma separated). SC3PS2 = Chaos
 rem Theory, every region. Other Ubisoft PS2 games get the normal login failure. To host another game later, add it,
 rem e.g. SC3PS2,PTPS2 for Pandora Tomorrow. SCCT_GAME_CHECK: refuse (default), log (let in, only log), off.

@@ -166,44 +166,185 @@ def forward(query: bytes, upstreams) -> bytes | None:
     return None
 
 
-def _dns_query(name: str, qtype: int = QTYPE_A) -> bytes:
+def _dns_query(name: str, qtype: int = QTYPE_A, qclass: int = 1) -> bytes:
     """Minimal DNS query (one question, recursion desired)."""
     tid = random.randint(0, 65535)
     flags = 0x0100  # RD
     labels = b"".join(struct.pack("!B", len(part)) + part.encode("ascii") for part in name.split(".")) + b"\x00"
-    return struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0) + labels + struct.pack("!HH", qtype, 1)
+    return struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0) + labels + struct.pack("!HH", qtype, qclass)
+
+
+CANARY_IP = "192.0.2.1"   # reserved test address: no DNS server can be there
+
+
+def _who(server: str) -> str:
+    """Name of whatever answers DNS sent to server (version.bind / id.server), or ''.
+    The real SCOPS DNS refuses these, so any name here belongs to someone else."""
+    for name in ("version.bind", "id.server"):
+        r = _probe(server, name, qtype=16, qclass=3, timeout=1.5)
+        if r["ok"] and r["txt"]:
+            return r["txt"][0][:60]
+    return ""
+
+
+def _src_kind(src: str, server: str, own_ips) -> str:
+    """Who sent a DNS reply, as far as this PC can tell.
+    pc     : this PC itself (127.x or one of its own addresses): VPN, antivirus, DNS filter
+    router : another home-network address: the router answers DNS for every device
+    server : claims to be the SCOPS server (real, or forged by whatever intercepts DNS)
+    remote : some other internet address
+    """
+    if not src:
+        return ""
+    if src.startswith("127.") or src in own_ips:
+        return "pc"
+    if src == server:
+        return "server"
+    try:
+        if ipaddress.IPv4Address(src).is_private:
+            return "router"
+    except ValueError:
+        pass
+    return "remote"
+
+
+def _classify_dns(server: str, wrong: list, canary_ok: bool, fake: dict, who: str, own_ips=None) -> tuple:
+    """Decide what a failed direct check means.
+
+    Red ("hijack"): the answer came from another internet server, or from the
+    router (the PS2 sits behind the same router, so it is affected too).
+    Amber ("filter"): the answer came from this PC, or was forged in the SCOPS
+    server's name, or even 192.0.2.1 answered. From the PC alone that can be a
+    program on this PC or the provider, so: try the PS2 first, local DNS if it fails.
+    """
+    if own_ips is None:
+        own_ips = set(all_ips()) | {get_ip()}
+    by = f" (it calls itself '{who}')" if who else ""
+    for w in wrong:
+        w["kind"] = _src_kind(w.get("src", ""), server, own_ips)
+    fake_ok = bool(fake.get("ok"))
+    fake_rcode = fake.get("rcode")
+    fake_src = fake.get("src") or ""
+    substituted = fake_ok and fake_rcode != 5
+    fake_kind = _src_kind(fake_src, server, own_ips) if substituted else ""
+    server_refused = fake_ok and fake_rcode == 5 and fake_src == server
+
+    remote = [w for w in wrong if w["kind"] == "remote"]
+    router = [w for w in wrong if w["kind"] == "router"]
+    if remote or router or fake_kind in ("remote", "router"):
+        if router or fake_kind == "router":
+            src = router[0]["src"] if router else fake_src
+            reason = f"your router ({src}) answers DNS itself{by}"
+        else:
+            src = remote[0]["src"] if remote else fake_src
+            reason = f"questions sent to {server} are answered by another DNS server ({src}){by}"
+        detail = "; ".join(w["text"] for w in wrong) if wrong else f"a test name came back from {fake_src}"
+        return "hijack", [
+            f"ISP DNS hijack detected: {reason}, not {server}.",
+            f"detail: {detail}",
+            "A PS2 set straight to the SCOPS DNS will not work from this network. Use the local DNS.",
+        ]
+
+    pc = [w for w in wrong if w["kind"] == "pc"]
+    forged = [w for w in wrong if w["kind"] == "server"]
+    if canary_ok or pc or forged or fake_kind in ("pc", "server"):
+        if pc:
+            where = pc[0]["text"]
+        elif forged:
+            where = forged[0]["text"].replace(f"from {server}", f"in the name of {server}")
+        elif canary_ok:
+            where = "a question sent to 192.0.2.1, where no DNS server exists, was answered"
+        else:
+            where = f"a test name came back with code {fake_rcode}"
+        extra = " The SCOPS server itself refused a test name, so it is reachable." if server_refused else ""
+        return "filter", [
+            f"PC DNS filter: DNS on this PC or your network is answered by something else ({where}){by}.{extra}",
+            f"Put {server} in the PS2 first. If the game does not get online (DNAS error), use the local DNS.",
+        ]
+
+    if server_refused:
+        return "retry", [
+            f"Could not get a SCOPS answer from {server}, but the server itself is reachable "
+            f"(it refused a test name as expected). Try again in a minute.",
+        ]
+
+    return "none", [
+        f"Could not get a SCOPS answer from {server} (no reply).",
+        "Use the local DNS. The SCOPS DNS may be blocked on this network even if public DNS works.",
+    ]
 
 
 def detect_dns_hijack(upstreams, server: str) -> None:
-    """Green when 38.49.212.120 itself answers with 38.49.212.120 at least once.
+    """Green when the SCOPS DNS itself answers a game name with its own address.
 
-    Up to 3 tries (two names), so one lost or late packet cannot turn a working
-    line red. "Hijack" needs two usable replies that are both wrong; anything
-    less is reported as "no SCOPS answer" instead.
+    Otherwise classify the failure. A reply from another internet host is a
+    hijack. A reply from this PC, or an answer to a query sent where no DNS
+    server can exist, is only a filter on this PC: the PS2 may still work.
     """
     names = ["gsconnect.ubisoft.com", "gate1.us.dnas.playstation.org", "gsconnect.ubisoft.com"]
     wrong = []
-    last = {"answers": [], "src": ""}
     for name in names:
         r = _probe(server, name)
-        last = r
         if r["ok"] and server in r["answers"] and r["src"] == server:
             say("INFO", f"SCOPS DNS {server} answered {name} with {server}.")
             say("INFO", "no hijack detected: your ISP lets you use the SCOPS DNS directly.")
             return
-        if r["ok"]:
+        if r["ok"] and not (r["rcode"] == 5 and r["src"] == server):
             got = ", ".join(r["answers"]) if r["answers"] else f"no address (code {r['rcode']})"
             where = "this PC or your home network" if r["local_reply"] else r["src"]
-            wrong.append(f"{name} came back as {got} from {where}")
+            wrong.append({
+                "text": f"{name} came back as {got} from {where}",
+                "local": bool(r["local_reply"]),
+                "src": r["src"],
+            })
         time.sleep(0.3)
-    if len(wrong) >= 2:
-        say("WARN", f"ISP DNS hijack detected: {wrong[0]}, not {server}.")
-        say("WARN", "detail: " + "; ".join(wrong))
-        say("WARN", "A PS2 set straight to the SCOPS DNS will not work from this network. Use the local DNS.")
-        return
-    answers = ", ".join(last["answers"]) if last["answers"] else "none"
-    say("WARN", f"Could not get a SCOPS answer from {server} ({answers}, from {last['src'] or 'nowhere'}).")
-    say("WARN", "Use the local DNS. The SCOPS DNS may be blocked on this network even if public DNS works.")
+
+    canary = _probe(CANARY_IP, "gsconnect.ubisoft.com", timeout=1.5)
+    made_up = f"scops-check-{secrets.token_hex(4)}.invalid"
+    fake = _probe(server, made_up, timeout=1.5)
+    interesting = canary["ok"] or wrong or (fake["ok"] and fake["rcode"] != 5)
+    who = _who(server) if interesting else ""
+    say("INFO", f"checks: 192.0.2.1 {'answered' if canary['ok'] else 'silent (good)'}; "
+                f"made-up name "
+                + ("answered, code " + str(fake["rcode"]) if fake["ok"] and fake["rcode"] != 5
+                   else ("refused (good)" if fake["ok"] else "no reply"))
+                + (f"; answering server calls itself '{who}'" if who else ""))
+
+    kind, lines = _classify_dns(server, wrong, canary["ok"], fake, who)
+    for line in lines:
+        say("WARN", line)
+    return
+
+
+def _txt_records(resp: bytes) -> list:
+    """TXT strings in a DNS response (first string of each record)."""
+    found = []
+    try:
+        off = 12
+        qd, an = struct.unpack_from("!HH", resp, 4)
+        for _ in range(qd):
+            while resp[off] != 0:
+                if resp[off] & 0xC0:
+                    off += 1
+                    break
+                off += 1 + resp[off]
+            off += 5
+        for _ in range(an):
+            if resp[off] & 0xC0:
+                off += 2
+            else:
+                while resp[off] != 0:
+                    off += 1 + resp[off]
+                off += 1
+            rtype, _, _, rdlen = struct.unpack_from("!HHIH", resp, off)
+            off += 10
+            if rtype == 16 and rdlen > 0:
+                ln = resp[off]
+                found.append(resp[off + 1:off + 1 + ln].decode("ascii", "replace"))
+            off += rdlen
+    except (IndexError, struct.error):
+        return found
+    return found
 
 
 def _a_records(resp: bytes) -> list:
@@ -239,20 +380,20 @@ def _a_records(resp: bytes) -> list:
     return found
 
 
-def _probe(server: str, name: str) -> dict:
+def _probe(server: str, name: str, qtype: int = QTYPE_A, qclass: int = 1, timeout: float = 2.5) -> dict:
     """One UDP DNS query. ok False means no usable reply."""
-    query = _dns_query(name)
+    query = _dns_query(name, qtype, qclass)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(2.5)
+    s.settimeout(timeout)
     try:
         s.sendto(query, (server, 53))
         resp, src = s.recvfrom(4096)
     except OSError:
-        return {"ok": False, "src": "", "rcode": -1, "ancount": 0, "answers": [], "local_reply": False}
+        return {"ok": False, "src": "", "rcode": -1, "ancount": 0, "answers": [], "txt": [], "local_reply": False}
     finally:
         s.close()
     if len(resp) < 12 or resp[:2] != query[:2]:
-        return {"ok": False, "src": src[0], "rcode": -1, "ancount": 0, "answers": [], "local_reply": False}
+        return {"ok": False, "src": src[0], "rcode": -1, "ancount": 0, "answers": [], "txt": [], "local_reply": False}
     flags = struct.unpack_from("!H", resp, 2)[0]
     ancount = struct.unpack_from("!H", resp, 6)[0]
     try:
@@ -260,7 +401,7 @@ def _probe(server: str, name: str) -> dict:
     except ValueError:
         local = False
     return {"ok": True, "src": src[0], "rcode": flags & 0x000F, "ancount": ancount,
-            "answers": _a_records(resp), "local_reply": local}
+            "answers": _a_records(resp), "txt": _txt_records(resp), "local_reply": local}
 
 
 def answer(data: bytes, client_ip: str, cfg) -> bytes | None:
