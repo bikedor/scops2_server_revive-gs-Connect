@@ -1,4 +1,4 @@
-# scopsDNS 2.1 / SCOPS window V8.11
+# scopsDNS 2.1 / SCOPS window V8.13
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
@@ -21,6 +21,14 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.13
+- **Only one SCOPS window at a time.** Opening it again (for example double-clicking SCOPS.exe twice while it is still starting) now says "already open" instead of starting a second window. A second window used to close the first window's DNS check, which then showed no answer until the app was reopened.
+- **No more silent DNS check.** If the check ends or hangs (40 s) without an answer, the window checks once more by itself, then shows "DNS check gave no answer" with a **Check again** button.
+
+## What changed in V8.12
+- **PC network card** list in the DNS section (idea from PSRewired's RetroDNS): every card of this PC that is up, with its address. Your Wi-Fi or Ethernet card that carries the internet is picked first; VPN and virtual adapters (ZeroTier, Tailscale, Hamachi, TAP/TUN, Hyper-V, VirtualBox, VMware, Bluetooth, ...) are listed last and marked "the PS2 cannot use this".
+- With local DNS on, the address shown for the PS2 is the picked card's address. Changing the card updates it at once (local DNS answers on every card, so nothing restarts).
 
 ## What changed in V8.11
 - Red ("DNS is being redirected") now also when your **router** answers DNS itself (a reply from another home-network address): the PS2 sits behind the same router, so it is affected too.

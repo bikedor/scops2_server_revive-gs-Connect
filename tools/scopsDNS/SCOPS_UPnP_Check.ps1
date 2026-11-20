@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.11
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.13
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -12,6 +12,17 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# One SCOPS window at a time (V8.13). A second window used to close the first window's DNS check as a "leftover"
+# process, so the first one sat on "Checking DNS..." with no answer until it was reopened.
+$script:OneWindow = New-Object System.Threading.Mutex($false, "Local\SCOPS_Window_SCCT")
+$script:OwnWindow = $false
+try { $script:OwnWindow = $script:OneWindow.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $script:OwnWindow = $true }
+if (-not $script:OwnWindow) {
+    [void][System.Windows.Forms.MessageBox]::Show("The SCOPS window is already open. Use that one (look on the taskbar).",
+        "SCOPS", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    exit
+}
 
 $script:UpnpLib = @'
 $GamePorts = @(3658) + (10070..10080)
@@ -28,6 +39,41 @@ function Test-PrivateIp([string]$ip) {
     if ($o[0] -eq 100 -and $o[1] -ge 64 -and $o[1] -le 127) { return $true }
     if ($o[0] -eq 169 -and $o[1] -eq 254) { return $true }
     return $false
+}
+
+function Get-PcAdapters {
+    # Every network card that is up with an IPv4 address, for the "PC network card" list (idea from PSRewired's
+    # RetroDNS adapter picker). Real Wi-Fi/Ethernet cards with a gateway come first, the one carrying internet traffic
+    # at the top; VPN and virtual adapters (ZeroTier, Tailscale, Hamachi, TAP/TUN, Hyper-V, VirtualBox, VMware,
+    # Bluetooth, ...) are listed last and marked, because a PS2 or PCSX2 on the home network cannot reach them.
+    $route = $null
+    try {
+        $u = New-Object System.Net.Sockets.UdpClient
+        $u.Connect("8.8.8.8", 53)          # UDP connect sends nothing; it only picks the route
+        $route = $u.Client.LocalEndPoint.Address.ToString()
+        $u.Close()
+    } catch {}
+    $virt = "ZeroTier|Tailscale|Hamachi|Radmin|WireGuard|Wintun|OpenVPN|\bTAP\b|\bTUN\b|\bVPN\b|NordLynx|Proton|Mullvad|" +
+            "Hyper-V|vEthernet|VirtualBox|VMware|Virtual|Bluetooth|Loopback|Docker|\bWSL\b|Teredo|6to4|isatap"
+    $list = @()
+    foreach ($n in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($n.OperationalStatus -ne "Up") { continue }
+        if ($n.NetworkInterfaceType -eq "Loopback" -or $n.NetworkInterfaceType -eq "Tunnel") { continue }
+        $p = $n.GetIPProperties()
+        $gw = $p.GatewayAddresses | Where-Object { $_.Address.AddressFamily -eq "InterNetwork" -and
+                                                   $_.Address.ToString() -ne "0.0.0.0" } | Select-Object -First 1
+        foreach ($ua in $p.UnicastAddresses) {
+            if ($ua.Address.AddressFamily -ne "InterNetwork") { continue }
+            $ip = $ua.Address.ToString()
+            if ($ip.StartsWith("169.254.") -or $ip.StartsWith("127.")) { continue }
+            $isVirt = ("$($n.Name) $($n.Description)" -match $virt)
+            $kind = if ($n.NetworkInterfaceType -eq "Wireless80211") { "Wi-Fi" } elseif ($isVirt) { "VPN/virtual" } else { "Ethernet" }
+            $rank = if ($isVirt) { 3 } elseif (-not $gw) { 2 } elseif ($ip -eq $route) { 0 } else { 1 }
+            $list += [pscustomobject]@{ Ip = $ip; Name = $n.Description; Kind = $kind; Virtual = $isVirt;
+                                        HasGw = [bool]$gw; Rank = $rank }
+        }
+    }
+    return @($list | Sort-Object Rank, Ip)
 }
 
 function Get-LanCandidates {
@@ -535,7 +581,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.11 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.13 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -610,6 +656,14 @@ $dnsBtn.Location = New-Object System.Drawing.Point(420, 96)
 $dnsBtn.Size = New-Object System.Drawing.Size(124, 30)
 $dnsBtn.Visible = $false
 $form.Controls.Add($dnsBtn)
+
+$dnsRetry = New-Object System.Windows.Forms.Button
+$dnsRetry.Text = "Check again"
+$dnsRetry.Location = New-Object System.Drawing.Point(420, 96)
+$dnsRetry.Size = New-Object System.Drawing.Size(124, 30)
+$dnsRetry.Visible = $false
+$form.Controls.Add($dnsRetry)
+$script:DnsTries = 0
 
 $title = New-Object System.Windows.Forms.Label
 $title.Text = "Hosting (UPnP)"
@@ -733,6 +787,52 @@ $close.Location = New-Object System.Drawing.Point(444, 572)
 $close.Size = New-Object System.Drawing.Size(100, 32)
 $form.Controls.Add($close)
 $close.Add_Click({ $form.Close() })
+
+# ---- PC network card (V8.12): which of this PC's addresses the PS2 should use for local DNS ----
+foreach ($ctl in @($form.Controls)) { if ($ctl.Top -ge 140) { $ctl.Top += 32 } }
+$form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, ($form.ClientSize.Height + 32))
+$nicLbl = New-Object System.Windows.Forms.Label
+$nicLbl.Text = "PC network card:"
+$nicLbl.Location = New-Object System.Drawing.Point(92, 145)
+$nicLbl.Size = New-Object System.Drawing.Size(110, 20)
+$form.Controls.Add($nicLbl)
+$nicBox = New-Object System.Windows.Forms.ComboBox
+$nicBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$nicBox.Location = New-Object System.Drawing.Point(204, 141)
+$nicBox.Size = New-Object System.Drawing.Size(340, 24)
+$form.Controls.Add($nicBox)
+$script:PcAdapters = @()
+try { $script:PcAdapters = Get-PcAdapters } catch { Write-ScopsLog "Get-PcAdapters failed: $($_.Exception.Message)" }
+foreach ($a in $script:PcAdapters) {
+    $t = "$($a.Ip)  -  $($a.Kind): $($a.Name)"
+    if ($a.Virtual) { $t += "  (VPN/virtual: the PS2 cannot use this)" }
+    elseif (-not $a.HasGw) { $t += "  (no router on this card)" }
+    [void]$nicBox.Items.Add($t)
+}
+if ($nicBox.Items.Count -gt 0) { $nicBox.SelectedIndex = 0 } else { [void]$nicBox.Items.Add("No network card found"); $nicBox.SelectedIndex = 0; $nicBox.Enabled = $false }
+Write-ScopsLog ("network cards: " + (($script:PcAdapters | ForEach-Object { "$($_.Ip) $($_.Kind) [$($_.Name)]" }) -join "; "))
+
+function Get-PickedIp {
+    $i = $nicBox.SelectedIndex
+    if ($i -ge 0 -and $i -lt $script:PcAdapters.Count) { return $script:PcAdapters[$i].Ip }
+    return $null
+}
+
+$nicBox.Add_SelectedIndexChanged({
+    $i = $nicBox.SelectedIndex
+    if ($i -lt 0 -or $i -ge $script:PcAdapters.Count) { return }
+    $a = $script:PcAdapters[$i]
+    Write-ScopsLog "network card picked: $($a.Ip) $($a.Kind) [$($a.Name)]"
+    if ($script:DnsMode -eq "serve" -and $script:DnsProc -and -not $script:DnsProc.HasExited) {
+        # local DNS listens on every card, so no restart is needed: just show the picked address
+        $dnsAddr.Text = "Put this in the PS2, both DNS entries:  $($a.Ip)"
+    }
+    if ($a.Virtual) {
+        $dnsDetail.Text = "That is a VPN or virtual adapter. A PS2 or PCSX2 on your home network cannot reach it. Pick your Wi-Fi or Ethernet card."
+    } elseif (-not $a.HasGw) {
+        $dnsDetail.Text = "This card has no router. Use it only if the PS2 is plugged into it directly."
+    }
+})
 
 $script:Gateway = ""
 $script:Svc = $null
@@ -1137,7 +1237,10 @@ function Start-ScopsDns {
         $arg = "`"$scriptPath`" --check-only --no-firewall --no-upnp"
     }
     $script:DnsMode = "check"
-    Write-ScopsLog "DNS check: $exe $arg"
+    $script:DnsTries++
+    $script:DnsCheckStart = Get-Date
+    $script:DnsState = "busy"
+    Write-ScopsLog "DNS check (try $($script:DnsTries)): $exe $arg"
     try {
         Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe)" } |
@@ -1271,6 +1374,29 @@ function Start-ScopsDns {
                     }
                 }
             }
+            if ($script:DnsMode -eq "check" -and $script:DnsState -eq "busy" -and $script:DnsProc) {
+                # V8.13: the check ended (or hung) without a verdict line. Try once more by itself, then offer "Check again".
+                $ended = $script:DnsProc.HasExited
+                $secs = ((Get-Date) - $script:DnsCheckStart).TotalSeconds
+                if (($ended -and $secs -ge 1) -or $secs -ge 40) {
+                    $why = if ($ended) { "the check ended without an answer (exit $($script:DnsProc.ExitCode))" } else { "no answer after 40 s" }
+                    Write-ScopsLog "DNS check try $($script:DnsTries): $why"
+                    if (-not $ended) { try { & taskkill /F /T /PID $script:DnsProc.Id 2>&1 | Out-Null } catch {} }
+                    $script:DnsTimer.Stop()
+                    if ($script:DnsTries -lt 2) {
+                        $dnsDetail.Text = "No answer yet, checking again..."
+                        Start-ScopsDns
+                    } else {
+                        $script:DnsState = "warn"
+                        $dnsHead.Text = "DNS check gave no answer"
+                        $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(160, 100, 0)
+                        $dnsDetail.Text = "Press Check again. You can still put 38.49.212.120 in the PS2."
+                        $dnsRetry.Visible = $true
+                        $dnsIcon.Invalidate()
+                    }
+                    return
+                }
+            }
             if ($script:DnsProc -and $script:DnsProc.HasExited -and -not $script:DnsExitLogged -and $script:DnsMode -eq "serve") {
                 $script:DnsExitLogged = $true
                 Write-ScopsLog "DNS exited code $($script:DnsProc.ExitCode)"
@@ -1290,6 +1416,17 @@ function Start-ScopsDns {
     Write-ScopsLog "DNS reader started"
 }
 
+
+$dnsRetry.Add_Click({
+    $dnsRetry.Visible = $false
+    $script:DnsTries = 0
+    $dnsHead.Text = "Checking DNS..."
+    $dnsHead.ForeColor = [System.Drawing.SystemColors]::ControlText
+    $dnsDetail.Text = "Checking whether your provider rewrites DNS."
+    $dnsIcon.Invalidate()
+    if ($script:DnsTimer) { try { $script:DnsTimer.Stop() } catch {} }
+    try { Start-ScopsDns } catch { Write-ScopsLog "Start-ScopsDns failed: $($_.Exception.Message)" }
+})
 
 $dnsBtn.Add_Click({
     $dnsBtn.Enabled = $false
@@ -1311,6 +1448,8 @@ $dnsBtn.Add_Click({
         $py = Get-Command python -ErrorAction SilentlyContinue
         if ($py) { $exe = $py.Source; $arg = "`"$(Join-Path $dir 'scopsDNS.py')`" --no-upnp" }
     }
+    $picked = Get-PickedIp
+    if ($exe -and $picked) { $arg += " --ip $picked" }
     if (-not $exe) { $dnsDetail.Text = "Python was not found."; return }
     $dnsLog = Join-Path $dir "scops-dns.log"
     if (Test-Path $dnsLog) { Remove-Item $dnsLog -Force -ErrorAction SilentlyContinue }
@@ -1335,3 +1474,4 @@ $dnsBtn.Add_Click({
 try { Start-ScopsDns } catch { Write-ScopsLog "Start-ScopsDns failed: $($_.Exception.Message)" }
 [void]$form.ShowDialog()
 Write-ScopsLog "window closed"
+try { $script:OneWindow.ReleaseMutex() } catch {}

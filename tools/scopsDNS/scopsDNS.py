@@ -1008,6 +1008,8 @@ def main(argv) -> int:
     ap.add_argument("--server", default=DEFAULT_SERVER, help=f"SCOPS server address (default {DEFAULT_SERVER})")
     ap.add_argument("--upstream", action="append", help="resolver for all other names (repeatable)")
     ap.add_argument("--listen", default="0.0.0.0", help="address to listen on (default: all)")
+    ap.add_argument("--ip", help="this computer's address to show the PS2 (the network card picked in the SCOPS window); "
+                                 "default: the card that carries internet traffic")
     ap.add_argument("--port", type=int, default=53, help="port (consoles need 53; others only for testing)")
     ap.add_argument("--no-tcp", action="store_true", help="UDP only")
     ap.add_argument("--verbose", action="store_true", help="also log names that are forwarded")
@@ -1036,6 +1038,13 @@ def main(argv) -> int:
         return 0 if manage_firewall("close", True, cfg.dry_run) else 1
 
     ip = get_ip()
+    if cfg.ip:
+        mine = set(all_ips()) | {ip}
+        if cfg.ip in mine:
+            ip = cfg.ip
+        else:
+            say("WARN", f"{cfg.ip} is not an address of this computer (it has {', '.join(sorted(mine))}); "
+                        f"showing {ip} instead.")
     if cfg.check_only:
         say("INFO", f"This computer's address: {format_ip(ip)}")
         detect_dns_hijack(cfg.upstream, cfg.server)
