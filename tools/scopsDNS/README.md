@@ -1,4 +1,4 @@
-# scopsDNS 2.1 / SCOPS window V8.13
+# scopsDNS 2.1 / SCOPS window V8.14
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
@@ -21,6 +21,11 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.14
+- **Log** button (idea from PSRewired's RetroDNS Log tab). It opens a log window that updates every 2 seconds: the DNS result, your network cards, the UPnP result and router, and the last lines of the window's two logs (`scops-dns.log`, `scops-window.log`).
+- If something does not work, press **Log**, then **Copy all**, and paste (Ctrl+V) in Discord. Copy all also saves it as `scops-report.txt` next to SCOPS.exe. **Open folder** opens that folder.
+- The log sends nothing anywhere by itself. Your public address is shortened to its first two parts (for example 162.202.x.x) and your Windows user name is hidden. Home-network addresses (192.168..., 10...) and the SCOPS server address stay whole because they are what we need to see.
 
 ## What changed in V8.13
 - **Only one SCOPS window at a time.** Opening it again (for example double-clicking SCOPS.exe twice while it is still starting) now says "already open" instead of starting a second window. A second window used to close the first window's DNS check, which then showed no answer until the app was reopened.

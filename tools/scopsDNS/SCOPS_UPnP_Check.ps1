@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.13
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.14
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -581,7 +581,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.13 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.14 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -787,6 +787,222 @@ $close.Location = New-Object System.Drawing.Point(444, 572)
 $close.Size = New-Object System.Drawing.Size(100, 32)
 $form.Controls.Add($close)
 $close.Add_Click({ $form.Close() })
+
+# ---- Log window (V8.14): a "Log" button opens a window with the live log of this SCOPS window (idea from PSRewired's
+# RetroDNS Log tab). It shows what this window found plus the last lines of its two logs, refreshes every 2 s, and
+# "Copy all" puts it on the clipboard to paste in Discord. It reads only local files; it sends nothing anywhere.
+# Public addresses are cut to their first two parts (the SCOPS server and the test address stay whole), and the
+# Windows user name in paths becomes %USERNAME%, so the text is safe to share.
+$report = New-Object System.Windows.Forms.Button
+$report.Text = "Log"
+$report.Location = New-Object System.Drawing.Point(330, 572)
+$report.Size = New-Object System.Drawing.Size(108, 32)
+$form.Controls.Add($report)
+$tip = New-Object System.Windows.Forms.ToolTip
+$tip.SetToolTip($report, "Shows the log. Use Copy all and paste it in Discord when something does not work.")
+
+function Hide-Private([string]$text) {
+    if (-not $text) { return "" }
+    $keep = @("38.49.212.120", "192.0.2.1", "8.8.8.8", "1.1.1.1", "0.0.0.0", "255.255.255.255")
+    $text = [regex]::Replace($text, '\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b', [System.Text.RegularExpressions.MatchEvaluator]{
+        param($m)
+        $ip = $m.Value
+        if ($keep -contains $ip) { return $ip }
+        $a = [int]$m.Groups[1].Value; $b = [int]$m.Groups[2].Value
+        if ($a -gt 255 -or $b -gt 255 -or [int]$m.Groups[3].Value -gt 255 -or [int]$m.Groups[4].Value -gt 255) { return $ip }
+        if ($a -eq 10 -or $a -eq 127 -or ($a -eq 192 -and $b -eq 168) -or ($a -eq 172 -and $b -ge 16 -and $b -le 31) -or
+            ($a -eq 169 -and $b -eq 254) -or ($a -eq 100 -and $b -ge 64 -and $b -le 127) -or $a -ge 224) { return $ip }
+        return "$a.$b.x.x"
+    })
+    if ($env:USERNAME) { $text = $text -replace [regex]::Escape("\Users\$($env:USERNAME)"), "\Users\%USERNAME%" }
+    return $text
+}
+
+function Read-Tail([string]$path, [int]$max, [string]$since = $null) {
+    if (-not $path -or -not (Test-Path $path)) { return @("(no file)") }
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs)
+        $all = @($sr.ReadToEnd() -split "`r?`n")
+        $sr.Close()
+    } catch { return @("(could not read: $($_.Exception.Message))") }
+    if ($since) {
+        $start = 0
+        for ($i = $all.Count - 1; $i -ge 0; $i--) { if ($all[$i] -like "*$since*") { $start = $i; break } }
+        $all = @($all[$start..($all.Count - 1)])
+    }
+    $all = @($all | Where-Object { $_ -ne "" })
+    if ($all.Count -eq 0) { return @("(empty)") }
+    if ($all.Count -gt $max) { $all = @("... ($($all.Count - $max) earlier lines left out)") + @($all[($all.Count - $max)..($all.Count - 1)]) }
+    return $all
+}
+
+function Get-ScopsReport {
+    $dir = Split-Path -Parent $PSCommandPath
+    if (-not $script:OsText) {
+        try { $o = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $script:OsText = "$($o.Caption) $($o.Version)" } catch { $script:OsText = [Environment]::OSVersion.VersionString }
+    }
+    $os = $script:OsText
+    $mode = "scopsDNS.py (Python)"
+    if (Test-Path (Join-Path $dir "scopsDNS.exe")) { $mode = "scopsDNS.exe" }
+    $alive = "not started"
+    if ($script:DnsProc) {
+        if (-not $script:DnsProc.HasExited) { $alive = "running" }
+        elseif ($script:DnsMode -eq "check") { $alive = "check finished (exit $($script:DnsProc.ExitCode))" }
+        else { $alive = "stopped (exit $($script:DnsProc.ExitCode))" }
+    }
+    if (-not $script:FwAt -or ((Get-Date) - $script:FwAt).TotalSeconds -gt 15) {   # netsh is slow: ask at most every 15 s
+        $script:FwText = "unknown"
+        try { if (Test-FirewallRule) { $script:FwText = "yes" } else { $script:FwText = "no" } } catch {}
+        $script:FwAt = Get-Date
+    }
+    $fw = $script:FwText
+    $routerName = ""
+    if ($script:Brand) { $routerName = "$($script:Brand.Name) $($script:Brand.Model)".Trim() } elseif ($script:RouterInfo) { $routerName = $script:RouterInfo }
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add("=== SCOPS log (V8.14) ===")
+    $L.Add("Time:      " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
+    $L.Add("Windows:   $os, PowerShell $($PSVersionTable.PSVersion)")
+    $L.Add("DNS tool:  $mode, $alive, mode=$($script:DnsMode), tries=$($script:DnsTries)")
+    $L.Add("")
+    $L.Add("--- DNS ---")
+    $L.Add("Result:    [$($script:DnsState)] $($dnsHead.Text)")
+    $L.Add("           $($dnsAddr.Text)")
+    $L.Add("           $($dnsDetail.Text)")
+    $L.Add("")
+    $L.Add("--- Network cards (picked: $($nicBox.Text)) ---")
+    foreach ($a in @($script:PcAdapters)) {
+        $gwTxt = "no"; if ($a.HasGw) { $gwTxt = "yes" }
+        $L.Add("  $($a.Ip)  $($a.Kind)  router=$gwTxt  [$($a.Name)]")
+    }
+    if (@($script:PcAdapters).Count -eq 0) { $L.Add("  none found") }
+    $L.Add("")
+    $L.Add("--- Hosting (UPnP) ---")
+    $L.Add("PS2 address: $($box.Text.Trim())")
+    $L.Add("Result:    $($head.Text)")
+    $L.Add("Router:    $($script:Gateway)  $routerName")
+    $L.Add("Forwards held by this window: $(@($script:Mapped).Count)   Firewall test rule present: $fw")
+    if ($detail.Text.Trim()) { foreach ($d in ($detail.Text -split "`r?`n")) { $L.Add("  | $d") } }
+    $L.Add("")
+    $L.Add("--- scops-dns.log (last 60 lines) ---")
+    foreach ($x in (Read-Tail (Join-Path $dir "scops-dns.log") 60)) { $L.Add($x) }
+    $L.Add("")
+    $L.Add("--- scops-window.log (this window, last 80 lines) ---")
+    foreach ($x in (Read-Tail $script:LogFile 80 "---- window opened ----")) { $L.Add($x) }
+    $L.Add("=== end of log ===")
+    return (Hide-Private ($L -join "`r`n"))
+}
+
+$script:LogWin = $null
+function Update-LogWindow([bool]$force = $false) {
+    if (-not $script:LogWin -or $script:LogWin.IsDisposed) { return }
+    $tb = $script:LogText
+    if (-not $force -and $tb.SelectionLength -gt 0) { return }          # the player is selecting text: do not jump
+    $text = ""
+    try { $text = Get-ScopsReport } catch { $text = "Log failed: $($_.Exception.Message)" }
+    if ($text -eq $tb.Text) { return }
+    $atEnd = ($tb.SelectionStart -ge ($tb.TextLength - 2)) -or $force
+    $keep = $tb.SelectionStart
+    $tb.Text = $text
+    if ($atEnd) { $tb.SelectionStart = $tb.TextLength; $tb.ScrollToCaret() }
+    else { $tb.SelectionStart = [Math]::Min($keep, $tb.TextLength); $tb.ScrollToCaret() }
+}
+
+function Show-LogWindow {
+    if ($script:LogWin -and -not $script:LogWin.IsDisposed) {
+        if ($script:LogWin.WindowState -eq "Minimized") { $script:LogWin.WindowState = "Normal" }
+        $script:LogWin.Activate(); Update-LogWindow $true; return
+    }
+    $w = New-Object System.Windows.Forms.Form
+    $w.Text = "SCOPS log"
+    $w.ClientSize = New-Object System.Drawing.Size(760, 520)
+    $w.MinimumSize = New-Object System.Drawing.Size(480, 300)
+    $w.StartPosition = "CenterParent"
+    $w.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $w.ShowInTaskbar = $true
+
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.Multiline = $true; $tb.ReadOnly = $true; $tb.WordWrap = $false
+    $tb.ScrollBars = "Both"
+    $tb.BackColor = [System.Drawing.Color]::FromArgb(24, 24, 32)
+    $tb.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 230)
+    $tb.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $tb.Location = New-Object System.Drawing.Point(10, 10)
+    $tb.Size = New-Object System.Drawing.Size(740, 456)
+    $tb.Anchor = "Top, Bottom, Left, Right"
+    $w.Controls.Add($tb)
+
+    $note = New-Object System.Windows.Forms.Label
+    $note.Text = "Updates every 2 s. Public address shortened, Windows user name hidden."
+    $note.ForeColor = [System.Drawing.Color]::DimGray
+    $note.Location = New-Object System.Drawing.Point(10, 482)
+    $note.Size = New-Object System.Drawing.Size(330, 30)
+    $note.Anchor = "Bottom, Left"
+    $w.Controls.Add($note)
+
+    $copy = New-Object System.Windows.Forms.Button
+    $copy.Text = "Copy all"
+    $copy.Location = New-Object System.Drawing.Point(430, 476)
+    $copy.Size = New-Object System.Drawing.Size(100, 32)
+    $copy.Anchor = "Bottom, Right"
+    $w.Controls.Add($copy)
+
+    $folder = New-Object System.Windows.Forms.Button
+    $folder.Text = "Open folder"
+    $folder.Location = New-Object System.Drawing.Point(540, 476)
+    $folder.Size = New-Object System.Drawing.Size(100, 32)
+    $folder.Anchor = "Bottom, Right"
+    $w.Controls.Add($folder)
+
+    $shut = New-Object System.Windows.Forms.Button
+    $shut.Text = "Close"
+    $shut.Location = New-Object System.Drawing.Point(650, 476)
+    $shut.Size = New-Object System.Drawing.Size(100, 32)
+    $shut.Anchor = "Bottom, Right"
+    $w.Controls.Add($shut)
+    $w.CancelButton = $shut
+
+    $script:LogWin = $w
+    $script:LogText = $tb
+    $script:LogCopy = $copy
+
+    $copy.Add_Click({
+        Update-LogWindow $true
+        $text = $script:LogText.Text
+        $file = Join-Path (Split-Path -Parent $PSCommandPath) "scops-report.txt"
+        try { [System.IO.File]::WriteAllText($file, $text, (New-Object System.Text.UTF8Encoding($false))) } catch {}
+        $ok = $false
+        for ($t = 0; $t -lt 3 -and -not $ok; $t++) {
+            try { [System.Windows.Forms.Clipboard]::SetText($text); $ok = $true } catch { Start-Sleep -Milliseconds 150 }
+        }
+        Write-ScopsLog "log copied ($($text.Length) chars, clipboard=$ok)"
+        if ($ok) {
+            $script:LogCopy.Text = "Copied!"
+            $back = New-Object System.Windows.Forms.Timer
+            $back.Interval = 2500
+            $back.Add_Tick({ if (-not $script:LogCopy.IsDisposed) { $script:LogCopy.Text = "Copy all" }; $this.Stop(); $this.Dispose() })
+            $back.Start()
+        } else {
+            $script:LogText.SelectAll(); $script:LogText.Focus()
+            [void][System.Windows.Forms.MessageBox]::Show("Could not copy by itself. The log is selected: press Ctrl+C. It is also saved as scops-report.txt.",
+                "SCOPS log", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        }
+    })
+    $folder.Add_Click({ try { Start-Process explorer.exe "`"$(Split-Path -Parent $PSCommandPath)`"" } catch {} })
+    $shut.Add_Click({ $script:LogWin.Close() })
+
+    $script:LogTimer = New-Object System.Windows.Forms.Timer
+    $script:LogTimer.Interval = 2000
+    $script:LogTimer.Add_Tick({ try { Update-LogWindow } catch {} })
+    $w.Add_FormClosed({ try { $script:LogTimer.Stop(); $script:LogTimer.Dispose() } catch {}; $script:LogWin = $null })
+
+    Write-ScopsLog "log window opened"
+    Update-LogWindow $true
+    $w.Show($form)
+    $script:LogTimer.Start()
+}
+
+$report.Add_Click({ try { Show-LogWindow } catch { Write-ScopsLog "log window failed: $($_.Exception.Message)" } })
 
 # ---- PC network card (V8.12): which of this PC's addresses the PS2 should use for local DNS ----
 foreach ($ctl in @($form.Controls)) { if ($ctl.Top -ge 140) { $ctl.Top += 32 } }
@@ -1284,12 +1500,18 @@ function Start-ScopsDns {
     $script:DnsTimer = New-Object System.Windows.Forms.Timer
     $script:DnsTimer.Interval = 300
     $script:DnsBeat = 0
+    $script:DnsLastAlive = ""
     $script:DnsTimer.Add_Tick({
         try {
             $script:DnsBeat++
             if (($script:DnsBeat % 10) -eq 0) {
+                # V8.14: log only when the DNS state changes, plus once a minute while it runs (was every 3 s, which
+                # filled the Log window with "alive, DNS exited 0" after a finished check).
                 $alive = if ($script:DnsProc -and -not $script:DnsProc.HasExited) { "running" } else { "exited $($script:DnsProc.ExitCode)" }
-                Write-ScopsLog "alive, DNS $alive"
+                if ($alive -ne $script:DnsLastAlive -or ($alive -eq "running" -and ($script:DnsBeat % 200) -eq 0)) {
+                    Write-ScopsLog "DNS $alive"
+                    $script:DnsLastAlive = $alive
+                }
             }
             if ($script:DnsRead) {
                 while ($script:DnsRead.Peek() -ge 0) {
