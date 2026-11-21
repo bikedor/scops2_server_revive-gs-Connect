@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.14
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.16
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -349,6 +349,27 @@ function Add-FirewallRule {
     } catch { return $false }      # the user said no to the Windows prompt
 }
 
+# V8.16: PCSX2 Sockets receives the game on this PC, so Windows has to allow the same UDP ports the router forwards.
+# Same rule name scopsDNS.py --close-firewall already deletes (scopsDNS-PCSX2-game-UDP).
+$script:GameRule = "scopsDNS-PCSX2-game-UDP"
+
+function Test-SocketsFirewall {
+    try {
+        $null = & netsh advfirewall firewall show rule "name=$($script:GameRule)" 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
+function Add-SocketsFirewall {
+    if (Test-SocketsFirewall) { return $true }
+    $a = "advfirewall firewall add rule name=$($script:GameRule) dir=in action=allow protocol=UDP " +
+         "localport=3658,10070-10080 profile=private,domain"
+    try {
+        $p = Start-Process -FilePath "netsh.exe" -ArgumentList $a -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+        return ($p.ExitCode -eq 0)
+    } catch { return $false }
+}
+
 function Send-ProbeMsg([string]$json, $dest = $null) {
     $b = [System.Text.Encoding]::ASCII.GetBytes($json)
     try {
@@ -463,8 +484,12 @@ function Invoke-Check([string]$ps2) {
     $pc = $cands[0].Ip
     $notes = @()
     if ($ps2 -eq $pc) {
-        $notes += "Note: $ps2 is this PC's own address. With PCSX2 in PCAP Bridged mode the game uses the PS2 Address " +
-                  "(Settings > Network & HDD), not the PC's. Only PCSX2 in Sockets mode uses the PC's address."
+        if ($sockets -and $sockets.Checked) {
+            $notes += "Sockets mode: $ps2 is this PC. That is correct for PCSX2 Sockets. The game arrives on Windows, not on a PS2 address."
+        } else {
+            $notes += "Note: $ps2 is this PC's own address. With PCSX2 in PCAP Bridged mode the game uses the PS2 Address " +
+                      "(Settings > Network & HDD), not the PC's. Tick 'PCSX2 Sockets mode' only if PCSX2 is in Sockets mode."
+        }
     }
     $vpn = @($cands | Where-Object { $_.Name -match "TAP|Wintun|WireGuard|VPN|Proton|OpenVPN|Tailscale|ZeroTier|NordLynx" })
 
@@ -581,7 +606,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.14 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.16 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -691,8 +716,8 @@ $form.Controls.Add($btn)
 $form.AcceptButton = $btn
 
 $hint = New-Object System.Windows.Forms.Label
-$hint.Text = "PCSX2 (PCAP Bridged): Settings > Network & HDD > PS2 Address, e.g. 192.168.1.240.`r`n" +
-             "Real PS2: the console's address (its network settings, or the router's device list)."
+$hint.Text = "PCAP Bridged: type the PS2 Address (Settings > Network & HDD). Real PS2: the console's address.`r`n" +
+             "Sockets: tick the box above. It fills this PC's address and allows the game through Windows."
 $hint.UseMnemonic = $false
 $hint.ForeColor = [System.Drawing.Color]::DimGray
 $hint.Location = New-Object System.Drawing.Point(16, 208)
@@ -845,6 +870,8 @@ function Get-ScopsReport {
     $os = $script:OsText
     $mode = "scopsDNS.py (Python)"
     if (Test-Path (Join-Path $dir "scopsDNS.exe")) { $mode = "scopsDNS.exe" }
+    if ($script:DnsToolKind) { $mode = $script:DnsToolKind }
+    if ($script:DnsExeOk -eq $false) { $mode += " (scopsDNS.exe here is an old build, skipped)" }
     $alive = "not started"
     if ($script:DnsProc) {
         if (-not $script:DnsProc.HasExited) { $alive = "running" }
@@ -860,7 +887,7 @@ function Get-ScopsReport {
     $routerName = ""
     if ($script:Brand) { $routerName = "$($script:Brand.Name) $($script:Brand.Model)".Trim() } elseif ($script:RouterInfo) { $routerName = $script:RouterInfo }
     $L = New-Object System.Collections.Generic.List[string]
-    $L.Add("=== SCOPS log (V8.14) ===")
+    $L.Add("=== SCOPS log (V8.16) ===")
     $L.Add("Time:      " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
     $L.Add("Windows:   $os, PowerShell $($PSVersionTable.PSVersion)")
     $L.Add("DNS tool:  $mode, $alive, mode=$($script:DnsMode), tries=$($script:DnsTries)")
@@ -879,6 +906,9 @@ function Get-ScopsReport {
     $L.Add("")
     $L.Add("--- Hosting (UPnP) ---")
     $L.Add("PS2 address: $($box.Text.Trim())")
+    $sockTxt = "no"
+    if ($sockets -and $sockets.Checked) { $sockTxt = "yes" }
+    $L.Add("Sockets:    $sockTxt")
     $L.Add("Result:    $($head.Text)")
     $L.Add("Router:    $($script:Gateway)  $routerName")
     $L.Add("Forwards held by this window: $(@($script:Mapped).Count)   Firewall test rule present: $fw")
@@ -1018,7 +1048,9 @@ $nicBox.Location = New-Object System.Drawing.Point(204, 141)
 $nicBox.Size = New-Object System.Drawing.Size(340, 24)
 $form.Controls.Add($nicBox)
 $script:PcAdapters = @()
-try { $script:PcAdapters = Get-PcAdapters } catch { Write-ScopsLog "Get-PcAdapters failed: $($_.Exception.Message)" }
+# @(): with one network card PowerShell 5.1 returns a single object with no .Count, and the Sockets box said
+# "No network card" (V8.16, 2026-11-21). Always keep a list.
+try { $script:PcAdapters = @(Get-PcAdapters) } catch { Write-ScopsLog "Get-PcAdapters failed: $($_.Exception.Message)" }
 foreach ($a in $script:PcAdapters) {
     $t = "$($a.Ip)  -  $($a.Kind): $($a.Name)"
     if ($a.Virtual) { $t += "  (VPN/virtual: the PS2 cannot use this)" }
@@ -1047,6 +1079,49 @@ $nicBox.Add_SelectedIndexChanged({
         $dnsDetail.Text = "That is a VPN or virtual adapter. A PS2 or PCSX2 on your home network cannot reach it. Pick your Wi-Fi or Ethernet card."
     } elseif (-not $a.HasGw) {
         $dnsDetail.Text = "This card has no router. Use it only if the PS2 is plugged into it directly."
+    }
+    if ($sockets -and $sockets.Checked) { $box.Text = $a.Ip }
+})
+
+# V8.16: PCSX2 Sockets. The game uses this PC's address, so the box locks to the picked network card.
+foreach ($ctl in @($form.Controls)) { if ($ctl.Top -ge 230) { $ctl.Top += 32 } }
+$form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, ($form.ClientSize.Height + 32))
+$sockets = New-Object System.Windows.Forms.CheckBox
+$sockets.Text = "PCSX2 Sockets mode (use this PC's address)"
+$sockets.AutoSize = $true
+$sockets.Location = New-Object System.Drawing.Point(110, 236)
+$form.Controls.Add($sockets)
+$tip.SetToolTip($sockets, "PCSX2 Sockets only. Fills this PC's address, aims UPnP at it, and allows UDP 3658 and 10070-10080 through Windows.")
+$script:ManualPs2 = ""
+$script:SocketsBusy = $false
+$sockets.Add_CheckedChanged({
+    if ($script:SocketsBusy) { return }
+    if ($sockets.Checked) {
+        $ip = Get-PickedIp
+        if (-not $ip) {
+            $script:SocketsBusy = $true
+            $sockets.Checked = $false
+            $script:SocketsBusy = $false
+            Set-Status "bad" "No network card" @("This PC has no address to use for Sockets mode. Connect to your home network and try again.")
+            return
+        }
+        $cur = $box.Text.Trim()
+        if ($cur -and $cur -ne $ip) { $script:ManualPs2 = $cur }
+        $box.Text = $ip
+        $box.ReadOnly = $true
+        $box.BackColor = [System.Drawing.SystemColors]::Control
+        $lbl.Text = "PC address:"
+        $idx = $nicBox.SelectedIndex
+        if ($idx -ge 0 -and $idx -lt $script:PcAdapters.Count -and $script:PcAdapters[$idx].Virtual) {
+            Set-Status "warn" "Sockets on a VPN adapter" @(
+                "$ip is a VPN or virtual adapter. Turn the VPN off while hosting, then pick your Wi-Fi or Ethernet card.",
+                "Sockets mode sends the game from this PC, so a VPN puts the host behind the VPN.")
+        }
+    } else {
+        $box.ReadOnly = $false
+        $box.BackColor = [System.Drawing.SystemColors]::Window
+        $lbl.Text = "PS2 address:"
+        if ($script:ManualPs2) { $box.Text = $script:ManualPs2 }
     }
 })
 
@@ -1203,10 +1278,17 @@ function Set-Status([string]$state, [string]$text, $lines) {
     $icon.Invalidate()
 }
 
-# last address used, for convenience
+# last address used, for convenience. Line 2 is "sockets" when PCSX2 Sockets mode was on.
 $cfgDir = Join-Path $env:APPDATA "SCOPS"
 $cfgFile = Join-Path $cfgDir "upnp_ps2_address.txt"
-try { if (Test-Path $cfgFile) { $box.Text = (Get-Content $cfgFile -TotalCount 1).Trim() } } catch {}
+try {
+    if (Test-Path $cfgFile) {
+        $lines = @(Get-Content $cfgFile -ErrorAction Stop)
+        $script:ManualPs2 = "$($lines[0])".Trim()
+        $box.Text = $script:ManualPs2
+        if ($lines.Count -gt 1 -and "$($lines[1])".Trim() -eq "sockets") { $sockets.Checked = $true }
+    }
+} catch {}
 
 $script:Refresh = New-Object System.Windows.Forms.Timer
 $script:Refresh.Interval = 20 * 60 * 1000
@@ -1274,15 +1356,55 @@ function Remove-Ours {
 }
 
 $btn.Add_Click({
+    if ($sockets.Checked) {
+        $picked = Get-PickedIp
+        if ($picked) { $box.Text = $picked }
+    }
     $ip = $box.Text.Trim()
     $okIp = $false
     $addr = $null
     if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and [System.Net.IPAddress]::TryParse($ip, [ref]$addr)) { $okIp = $true }
     if (-not $okIp) {
-        Set-Status "bad" "That is not a PS2 address" @("Type the address as four numbers with dots, for example 192.168.1.240.")
+        Set-Status "bad" "That is not an address" @("Type the address as four numbers with dots, for example 192.168.1.240. For PCSX2 Sockets, tick the box instead.")
         return
     }
-    try { if (-not (Test-Path $cfgDir)) { [void](New-Item -ItemType Directory $cfgDir) }; Set-Content $cfgFile $ip } catch {}
+    $script:SocketsFwNote = ""
+    $script:PublicNote = ""
+    if ($sockets.Checked) {
+        # V8.16: the Sockets rule is for Private/Domain networks only; Windows 11 often marks a home network Public.
+        try {
+            $pickedIp = $box.Text.Trim()
+            $ifx = (Get-NetIPAddress -AddressFamily IPv4 -IPAddress $pickedIp -ErrorAction Stop | Select-Object -First 1).InterfaceIndex
+            $cat = (Get-NetConnectionProfile -InterfaceIndex $ifx -ErrorAction Stop | Select-Object -First 1).NetworkCategory
+            Write-ScopsLog "Sockets: network category of $pickedIp is $cat"
+            if ("$cat" -eq "Public") {
+                $script:PublicNote = "Your network is set to Public in Windows, so the Sockets firewall rule does not apply and players may not reach this PC directly (they still get in through the relay). Fix: Windows Settings > Network & internet > Ethernet or Wi-Fi > your network > Network profile type: Private."
+            }
+        } catch {
+            Write-ScopsLog "Sockets: network category not read ($($_.Exception.Message))"
+        }
+        if (Test-SocketsFirewall) {
+            $script:SocketsFwNote = "Windows firewall: the Sockets rule is already in place (UDP 3658 and 10070-10080)."
+        } else {
+            Set-Status "busy" "Allow the game in Windows..." @(
+                "Windows will ask once to allow UDP 3658 and 10070-10080 on this PC. Say yes.",
+                "This is only for PCSX2 Sockets mode, because the game arrives on this PC.")
+            $form.Refresh()
+            [System.Windows.Forms.Application]::DoEvents()
+            if (Add-SocketsFirewall) {
+                $script:SocketsFwNote = "Windows firewall: allowed UDP 3658 and 10070-10080 on this PC."
+            } else {
+                $script:SocketsFwNote = "Windows firewall: not changed (the prompt was declined). If players cannot join, allow PCSX2 when Windows asks."
+            }
+        }
+    }
+    try {
+        if (-not (Test-Path $cfgDir)) { [void](New-Item -ItemType Directory $cfgDir) }
+        $saveAddr = $ip
+        if ($sockets.Checked -and $script:ManualPs2) { $saveAddr = $script:ManualPs2 }
+        $modeLine = if ($sockets.Checked) { "sockets" } else { "ps2" }
+        Set-Content $cfgFile @($saveAddr, $modeLine)
+    } catch {}
     if ($script:Svc -and $script:Ps2 -and $script:Ps2 -ne $ip) { Remove-Ours }   # address changed: drop the old forwards
     $script:Refresh.Stop()
     $btn.Enabled = $false
@@ -1298,6 +1420,9 @@ $btn.Add_Click({
         Set-Status "bad" "The check failed" @("Something went wrong while checking. Please send a screenshot of this window.", "",
             "$($e.Exception.GetType().FullName): $($e.Exception.Message)", "",
             "$($e.InvocationInfo.PositionMessage)", "", "$($e.ScriptStackTrace)")
+        if ($script:SocketsFwNote) { $detail.AppendText("`r`n`r`n$($script:SocketsFwNote)") }
+    if ($script:PublicNote) { $detail.AppendText("`r`n`r`n$($script:PublicNote)") }
+        if ($script:PublicNote) { $detail.AppendText("`r`n`r`n$($script:PublicNote)") }
     }
     $form.Cursor = [System.Windows.Forms.Cursors]::Default
     $btn.Enabled = $true
@@ -1305,6 +1430,8 @@ $btn.Add_Click({
     if ($r -is [System.Management.Automation.PSObject]) { $r = $r.BaseObject }
     $script:OpenFlag = $false
     Set-Status $r.State $r.Head $r.Lines
+    if ($script:SocketsFwNote) { $detail.AppendText("`r`n`r`n$($script:SocketsFwNote)") }
+    if ($script:PublicNote) { $detail.AppendText("`r`n`r`n$($script:PublicNote)") }
     if ($r.Gateway -and $r.Gateway -ne $script:Gateway) { $script:Gateway = $r.Gateway; $script:Brand = $null }
     if ($r.Svc -and ($r.Svc.Make -or $r.Svc.Model)) {
         $info = "$($r.Svc.Make) $($r.Svc.Model)".Trim()
@@ -1333,7 +1460,7 @@ function Stop-ScopsDns {
     if ($script:DnsProc) { $ids += $script:DnsProc.Id }
     try {
         $ours = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe)" })
+            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe|ps1)" })
         foreach ($p in $ours) { $ids += $p.ProcessId }
     } catch {
         Write-ScopsLog "leftover lookup failed: $($_.Exception.Message)"
@@ -1347,7 +1474,7 @@ function Stop-ScopsDns {
     $still = @()
     try {
         $still = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe)" })
+            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe|ps1)" })
     } catch {}
     foreach ($p in $still) {
         Write-ScopsLog "still running after kill, forcing pid $($p.ProcessId)"
@@ -1357,7 +1484,7 @@ function Stop-ScopsDns {
     $left = @()
     try {
         $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe)" })
+            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe|ps1)" })
     } catch {}
     $held = @()
     try {
@@ -1423,43 +1550,105 @@ function Set-Dns([string]$state, [string]$head, [string]$detail) {
     }) | Out-Null
 }
 
+# V8.15: find a Python 3 that really runs. Windows ships a "python.exe" placeholder in ...\WindowsApps that only says
+# "Python was not found" and exits 9009 (2026-11-20 BLACKNIGHT: the DNS check ran it twice and showed "no answer").
+# Every candidate is test-run; a WindowsApps path is used only if it is a real Store Python that runs.
+function Find-RealPython {
+    $cands = @()
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        try {
+            $found = & py -3 -c "import sys; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $found) { $cands += ($found | Select-Object -Last 1).ToString().Trim() }
+        } catch {}
+    }
+    foreach ($name in @("python", "python3")) {
+        foreach ($c in @(Get-Command $name -All -ErrorAction SilentlyContinue)) { if ($c.Source) { $cands += $c.Source } }
+    }
+    foreach ($c in ($cands | Select-Object -Unique)) {
+        if (-not $c -or -not (Test-Path $c)) { continue }
+        try {
+            $out = & $c -c "import sys; print(sys.version_info[0])" 2>$null
+            if ($LASTEXITCODE -eq 0 -and ($out | Select-Object -Last 1) -eq "3") { return $c }
+            Write-ScopsLog "Python candidate skipped (does not run, exit $LASTEXITCODE): $c"
+        } catch {
+            Write-ScopsLog "Python candidate skipped ($($_.Exception.Message)): $c"
+        }
+    }
+    return $null
+}
+
+# V8.16: a scopsDNS.exe built from an old scopsDNS.py has no --check-only and fails every check ("unrecognized
+# arguments", exit 2; 2026-11-21). Ask it for --help once; an exe that does not list --check-only is skipped.
+$script:DnsExeOk = $null
+function Test-DnsExe([string]$path) {
+    if ($null -ne $script:DnsExeOk) { return $script:DnsExeOk }
+    $ok = $false
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $path
+        $psi.Arguments = "--help"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $txt = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
+        if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch {} }
+        $ok = ($txt -match "--check-only")
+        if (-not $ok) { Write-ScopsLog "scopsDNS.exe is an old build (no --check-only); skipped. Rebuild it from scopsDNS.py with build_exe.bat, or delete it." }
+    } catch {
+        Write-ScopsLog "scopsDNS.exe could not run ($($_.Exception.Message)); skipped"
+    }
+    $script:DnsExeOk = $ok
+    return $ok
+}
+
+# V8.15: which DNS tool to run. scopsDNS.exe, else a real Python 3 with scopsDNS.py, else the built-in scopsDNS.ps1
+# (Windows PowerShell, on every Windows 10/11: nothing to install). Returns @{ Exe; Arg; Kind } or $null.
+# $mode "check" = the start-up check; "serve" = the local DNS for a network that hijacks DNS.
+function Get-DnsTool([string]$mode) {
+    $dir = Split-Path -Parent $PSCommandPath
+    $exePath = Join-Path $dir "scopsDNS.exe"
+    $pyPath = Join-Path $dir "scopsDNS.py"
+    $psPath = Join-Path $dir "scopsDNS.ps1"
+    $pyArgs = if ($mode -eq "check") { "--check-only --no-firewall --no-upnp" } else { "--no-upnp" }
+    $psArgs = if ($mode -eq "check") { "-CheckOnly -NoFirewall -NoUpnp" } else { "-NoUpnp" }
+    if ((Test-Path $exePath) -and (Test-DnsExe $exePath)) { return @{ Exe = $exePath; Arg = $pyArgs; Kind = "scopsDNS.exe"; IpFlag = "--ip" } }
+    if (Test-Path $pyPath) {
+        $py = Find-RealPython
+        if ($py) { return @{ Exe = $py; Arg = "`"$pyPath`" $pyArgs"; Kind = "scopsDNS.py (Python)"; IpFlag = "--ip" } }
+    }
+    if (Test-Path $psPath) {
+        $psExe = Join-Path $PSHOME "powershell.exe"
+        if (-not (Test-Path $psExe)) { $psExe = "powershell.exe" }
+        return @{ Exe = $psExe; Arg = "-NoProfile -ExecutionPolicy Bypass -File `"$psPath`" $psArgs"; Kind = "scopsDNS.ps1 (built-in)"; IpFlag = "-Ip" }
+    }
+    return $null
+}
+
 function Start-ScopsDns {
     $dir = Split-Path -Parent $PSCommandPath
-    $scriptPath = Join-Path $dir "scopsDNS.py"
-    $exePath = Join-Path $dir "scopsDNS.exe"
-    $exe = $null
-    $arg = $null
-    if (Test-Path $exePath) {
-        $exe = $exePath
-        $arg = "--check-only --no-firewall --no-upnp"
-    } else {
-        if (-not (Test-Path $scriptPath)) {
-            Set-Dns "bad" "DNS could not start" "Neither scopsDNS.exe nor scopsDNS.py is in this folder."
-            return
-        }
-        $py = Get-Command py -ErrorAction SilentlyContinue
-        if ($py) {
-            $found = & py -3 -c "import sys; print(sys.executable)" 2>$null
-            if ($found -and (Test-Path ($found | Select-Object -Last 1))) { $exe = ($found | Select-Object -Last 1).ToString().Trim() }
-        }
-        if (-not $exe) {
-            $python = Get-Command python -ErrorAction SilentlyContinue
-            if ($python) { $exe = $python.Source }
-        }
-        if (-not $exe) {
-            Set-Dns "bad" "Python 3 was not found" "Install Python from python.org, or build scopsDNS.exe with build_exe.bat."
-            return
-        }
-        $arg = "`"$scriptPath`" --check-only --no-firewall --no-upnp"
+    $tool = Get-DnsTool "check"
+    if (-not $tool) {
+        Write-ScopsLog "DNS check: no scopsDNS.exe, no working Python 3 and no scopsDNS.ps1 in this folder"
+        $script:DnsState = "warn"
+        Set-Dns "warn" "DNS check could not start" "scopsDNS.ps1 is missing from this folder. Unzip the whole SCOPS folder again, then press Check again. You can still put 38.49.212.120 in the PS2."
+        try { $dnsRetry.Visible = $true } catch {}
+        return
     }
+    $exe = $tool.Exe
+    $arg = $tool.Arg
+    $script:DnsToolKind = $tool.Kind
     $script:DnsMode = "check"
+    $script:DnsEndedAt = $null
     $script:DnsTries++
     $script:DnsCheckStart = Get-Date
     $script:DnsState = "busy"
     Write-ScopsLog "DNS check (try $($script:DnsTries)): $exe $arg"
     try {
-        Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe)" } |
+        Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'scopsDNS.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match "scopsDNS\.(py|exe|ps1)" } |
             ForEach-Object {
                 Write-ScopsLog "closing leftover DNS pid $($_.ProcessId)"
                 Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -1600,7 +1789,12 @@ function Start-ScopsDns {
                 # V8.13: the check ended (or hung) without a verdict line. Try once more by itself, then offer "Check again".
                 $ended = $script:DnsProc.HasExited
                 $secs = ((Get-Date) - $script:DnsCheckStart).TotalSeconds
-                if (($ended -and $secs -ge 1) -or $secs -ge 40) {
+                # V8.15: the check can finish (exit 0) before this window has read its last lines from scops-dns.log.
+                # 2026-11-20: try 1 answered in 0.6 s, was called "no answer" on the same tick, and try 2 deleted its
+                # log. Keep reading for 2 s after the check ends; only then call it "no answer".
+                if ($ended -and -not $script:DnsEndedAt) { $script:DnsEndedAt = Get-Date }
+                $endedFor = if ($script:DnsEndedAt) { ((Get-Date) - $script:DnsEndedAt).TotalSeconds } else { 0 }
+                if (($ended -and $endedFor -ge 2) -or $secs -ge 40) {
                     $why = if ($ended) { "the check ended without an answer (exit $($script:DnsProc.ExitCode))" } else { "no answer after 40 s" }
                     Write-ScopsLog "DNS check try $($script:DnsTries): $why"
                     if (-not $ended) { try { & taskkill /F /T /PID $script:DnsProc.Id 2>&1 | Out-Null } catch {} }
@@ -1613,6 +1807,10 @@ function Start-ScopsDns {
                         $dnsHead.Text = "DNS check gave no answer"
                         $dnsHead.ForeColor = [System.Drawing.Color]::FromArgb(160, 100, 0)
                         $dnsDetail.Text = "Press Check again. You can still put 38.49.212.120 in the PS2."
+                        if ($ended -and $script:DnsProc.ExitCode -eq 9009) {   # cmd.exe: program not found
+                            $dnsHead.Text = "DNS check needs Python 3"
+                            $dnsDetail.Text = "The check program could not start (exit 9009). Install Python 3 from python.org (tick 'Add python.exe to PATH'), then press Check again. You can still put 38.49.212.120 in the PS2."
+                        }
                         $dnsRetry.Visible = $true
                         $dnsIcon.Invalidate()
                     }
@@ -1664,15 +1862,11 @@ $dnsBtn.Add_Click({
     }
     $dir = Split-Path -Parent $PSCommandPath
     $exe = $null; $arg = $null
-    if (Test-Path (Join-Path $dir "scopsDNS.exe")) {
-        $exe = Join-Path $dir "scopsDNS.exe"; $arg = "--no-upnp"
-    } else {
-        $py = Get-Command python -ErrorAction SilentlyContinue
-        if ($py) { $exe = $py.Source; $arg = "`"$(Join-Path $dir 'scopsDNS.py')`" --no-upnp" }
-    }
+    $tool = Get-DnsTool "serve"
+    if ($tool) { $exe = $tool.Exe; $arg = $tool.Arg; $script:DnsToolKind = $tool.Kind }
     $picked = Get-PickedIp
-    if ($exe -and $picked) { $arg += " --ip $picked" }
-    if (-not $exe) { $dnsDetail.Text = "Python was not found."; return }
+    if ($exe -and $picked) { $arg += " $($tool.IpFlag) $picked" }
+    if (-not $exe) { $dnsDetail.Text = "scopsDNS.ps1 is missing from this folder. Unzip the whole SCOPS folder again and try again."; return }
     $dnsLog = Join-Path $dir "scops-dns.log"
     if (Test-Path $dnsLog) { Remove-Item $dnsLog -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType File -Path $dnsLog -Force | Out-Null

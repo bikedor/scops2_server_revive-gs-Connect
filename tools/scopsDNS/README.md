@@ -1,14 +1,14 @@
-# scopsDNS 2.1 / SCOPS window V8.14
+# scopsDNS 2.1 / SCOPS window V8.16
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
    Windows may say "Windows protected your PC" / unrecognized app: the program is not code-signed.
    Click **More info -> Run anyway**. If your antivirus blocks the exe, use **SCOPS_UPnP_Check.bat** instead (same window).
 2. **DNS** (everyone): follow the top of the window. Green check = put **38.49.212.120** in both DNS entries.
-3. **Hosting (UPnP)** (only if you host): type the PS2 address and press **Check UPnP**.
-   - PCSX2 in **PCAP Bridged** mode: Settings > Network & HDD > **PS2 Address** (e.g. 192.168.1.240).
-   - PCSX2 in **Sockets** mode: **this PC's own address**.
-   - Real PS2: the console's address (its network settings, or the router's device list).
+3. **Hosting (UPnP)** (only if you host): press **Check UPnP**.
+   - PCSX2 in **Sockets** mode: tick **PCSX2 Sockets mode**. The address fills with this PC and locks. Windows asks once to allow UDP 3658 and 10070-10080.
+   - PCSX2 in **PCAP Bridged** mode: leave the box unticked and type the **PS2 Address** (Settings > Network & HDD, e.g. 192.168.1.240).
+   - Real PS2: leave the box unticked and type the console's address.
    - Turn any **VPN off** while hosting.
 4. Leave the window open while you host; close it when you are done (that removes the forwards).
    With more than one joiner, have each wait 20-30 seconds after the previous one got in (unless the host is on a
@@ -21,6 +21,23 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.16
+- **PCSX2 Sockets checkbox.** Tick it and the address becomes this PC's address (the network card picked above) and cannot be typed over. Untick it and the last PS2 address comes back.
+- On Check UPnP with the box ticked, Windows is asked once to allow UDP 3658 and 10070-10080 on this PC (rule `scopsDNS-PCSX2-game-UDP`). PCAP Bridged and a real PS2 do not get that rule. **Remove firewall rules.bat** still deletes it.
+- The Log report has a `Sockets: yes/no` line. The window title says **SCOPS V8.16**.
+- **Old scopsDNS.exe is skipped.** An exe built from an older scopsDNS.py has no `--check-only` and made every check fail ("unrecognized arguments", exit 2). The window now asks the exe for `--help` once and skips it if `--check-only` is missing (Python or the built-in `scopsDNS.ps1` is used instead; the Log report says so). Rebuild the exe from the current scopsDNS.py with build_exe.bat.
+- **One network card fixed.** On a PC with a single network card the Sockets box said "No network card" (PowerShell 5.1 returns one card without a count). The card list is now always a list, which also fixes the picked-card address shown while the local DNS runs.
+- **Public network warning** (Sockets mode): if Windows has the network set to Public, the Sockets firewall rule does not apply. Check UPnP says how to set it to Private.
+- **Remove firewall rules.bat** tries scopsDNS.exe first, then Python, then removes the rules directly (it used to stop at the Windows Store python placeholder).
+
+## What changed in V8.15
+- **No Python needed.** The DNS check and the local DNS now also come as `scopsDNS.ps1`, a copy of `scopsDNS.py` that runs on the Windows PowerShell built into every Windows 10/11. Same tests, same results. The window uses `scopsDNS.exe` if it is in the folder, then a real Python with `scopsDNS.py`, and otherwise `scopsDNS.ps1`. Players just double-click SCOPS.exe.
+- The Windows Store `python.exe` placeholder ("Python was not found", exit 9009) is skipped: every Python the window finds is test-run first (2026-11-20: a PC without Python showed "DNS check gave no answer").
+- The Log report says which DNS tool ran (`scopsDNS.exe`, `scopsDNS.py (Python)` or `scopsDNS.ps1 (built-in)`).
+- **First-launch "no answer" fixed.** A fast check (under a second) could finish before the window read its result; the window called it "no answer", started a second try and deleted the first result. It now keeps reading for 2 s after the check ends.
+- `Test DNS check (built-in).bat`: runs the built-in check in a window and shows the result, for testing.
+- The built-in local DNS answers on UDP 53 only (what the PS2 uses); the Python and exe versions also answer TCP 53.
 
 ## What changed in V8.14
 - **Log** button (idea from PSRewired's RetroDNS Log tab). It opens a log window that updates every 2 seconds: the DNS result, your network cards, the UPnP result and router, and the last lines of the window's two logs (`scops-dns.log`, `scops-window.log`).
