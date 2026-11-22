@@ -16,7 +16,7 @@ This fork adds fixes for the lobby and room list so that real PS2 consoles and P
    - **PCSX2:** Settings -> Network & HDD, DNS 1 and DNS 2 on **Manual**, `38.49.212.120`. See [PCSX2](#pcsx2) and, if DNAS fails, [Troubleshooting](#troubleshooting).
 3. Go online and create an account in the game.
 
-If your internet provider blocks outside DNS, run the SCOPS window (`tools/scopsDNS/SCOPS.exe`) on a PC on the same network: it checks this and can act as a local DNS for the console. Hosting a room works without router setup, but read [wait times without port forwarding](#hosting-a-room-wait-times-without-port-forwarding) first.
+If your internet provider blocks outside DNS, run the SCOPS app on a computer on the same network: it checks this and can act as a local DNS for the console. **Windows:** the SCOPS window, `tools/scopsDNS/SCOPS.exe`. **Mac:** `tools/scopsDNS/SCOPS Mac.command` (see `tools/scopsDNS/README_MAC.txt`). Hosting a room works without router setup, but read [wait times without port forwarding](#hosting-a-room-wait-times-without-port-forwarding) first.
 
 ## Status
 
@@ -52,8 +52,9 @@ Anyone can host a room over the internet with no router setup: the server's rela
 
 | Host's router | Joining a room | Coming back after a map ends |
 |---|---|---|
+| Real PS2 plugged straight into the modem (no router) | quick | quick (about 12 s, the map load) |
 | UDP 3658 and 10070-10080 forwarded by hand to the console or PCSX2 | quick | quick |
-| UPnP only | quick | often quick; on some routers players still wait as below |
+| UPnP only (the SCOPS app) | quick | usually quick; on some routers a few returns still wait as below |
 | No port forwarding, no DMZ | works, through the relay | some players wait about **10-25 seconds** (now and then longer) before they are back in |
 
 **If the host has no port forwarding:**
@@ -64,10 +65,12 @@ Anyone can host a room over the internet with no router setup: the server's rela
 
 **To make it quick, the host should (best first):**
 
-A Windows helper is included: **`tools/scopsDNS/SCOPS.exe`** (the SCOPS window). It checks whether the SCOPS DNS works from your network, can open these ports by UPnP while it stays open, and opens your router's page plus a port-forward guide for your router's brand. See `tools/scopsDNS/README.md`.
+A helper app is included, for **Windows** (**`tools/scopsDNS/SCOPS.exe`**, the SCOPS window) and **Mac** (**`tools/scopsDNS/SCOPS Mac.command`**). It checks whether the SCOPS DNS works from your network, can open these ports by UPnP while it stays open, and opens your router's page plus a port-forward guide for your router's brand. **Find my PS2** looks for a real PS2 (or PCSX2 in PCAP Bridged mode) on your network by its Sony network ID and fills in its address, so you don't need the router to find it: start the game's online menu first. See `tools/scopsDNS/README.md` and `README_MAC.txt`.
+
+**PCSX2 in Sockets mode:** the game arrives on the PC itself, so Windows Firewall must also allow UDP 3658 and 10070-10080. Tick **PCSX2 Sockets mode** in the SCOPS window and press Check UPnP (it adds the rule), or run `SCOPS_PCSX2_Firewall.bat`. Without it, even a working router forward behaves like no forward. The window's rule covers Private networks; if Windows has your network set to **Public**, the window says how to change it.
 
 1. **Forward the ports by hand** on the router: UDP **3658** and **10070-10080** to the console's or PCSX2 PC's LAN IP (give that device a fixed IP). Guides for most routers: [portforward.com](https://portforward.com/router.htm). In testing, a manual forward removed the slow returns.
-2. **UPnP** can help on some routers, but on others (an ASUS tested here) the router still closed the unused ports, so players waited anyway.
+2. **UPnP** (the SCOPS app) works on many routers. On the ASUS tested here (21 Nov 2026) it worked for new connections, but a path that had been quiet for about 45 seconds was blocked, so a few returns per session still waited 15-28 seconds. A manual forward on the same router did not do this.
 3. **DMZ, only as a last resort.** DMZ sends every unrequested connection to one device. Point it at the **console** only, never at a PC you use for anything else, give the console a fixed IP, and turn DMZ off when you finish playing.
 
 ASUS routers: keep hardware acceleration (Runner / Flow Cache) **on**. Turning it off made the host's console stop answering the relay and players were dropped.
@@ -341,7 +344,7 @@ On every client, set the **DNS server manually to the server's IP**.
    - **Gateway Address:** your own Default Gateway from `ipconfig` (do not copy one from this README)
    - **DNS 1 and DNS 2:** the server's IP (the public IP of the server you are joining)
 5. Set the PS2 network config on the memory card to get its address automatically (DHCP), then restart the game in PCSX2 (settings are read at startup).
-6. Optional: run `SCOPS_PCSX2_Firewall.bat` (adds Windows Firewall rules for UDP 3658, 10070-10080, 45000-45012 and the server TCP ports; `SCOPS_PCSX2_Firewall.bat remove` deletes them). It matters mostly in Sockets mode; PCAP Bridged traffic mostly bypasses Windows Firewall.
+6. Run `SCOPS_PCSX2_Firewall.bat` (adds Windows Firewall rules for UDP 3658, 10070-10080, 45000-45012 and the server TCP ports; `SCOPS_PCSX2_Firewall.bat remove` deletes them), or tick **PCSX2 Sockets mode** in the SCOPS window. **Required to host in Sockets mode** (without it Windows blocks new player connections and the host is treated as having no port forward); optional for PCAP Bridged, whose traffic mostly bypasses Windows Firewall.
 7. To **host**, forward UDP 3658 and 10070-10080 on your router to your PC, unless the server runs the UDP relay. Joining needs nothing.
 
 Details and troubleshooting:
@@ -435,6 +438,7 @@ tools/ubigs_router_server.py      router (port 40000), optional KE1 variant
 tools/nat2/udp_reply_server.py    NAT service on UDP 45000+ (even-length replies) and the UDP relay
 tools/nat_check/                  NAT type probes for the relay design
 SCOPS_PCSX2_Firewall.bat          PCSX2 player helper: Windows Firewall rules for playing and hosting (add / remove)
+tools/scopsDNS/                   SCOPS app for players: DNS check, local DNS, UPnP, Find my PS2 (Windows SCOPS.exe, Mac SCOPS Mac.command)
 open_ports.ps1                    adds the Windows firewall rules for the server and relay
 docs/RELAY.md                     relay design, test log and limits
 tools/net_utils.py                LAN/outside client checks and public-IP selection (SCCT_PUBLIC_IP)
