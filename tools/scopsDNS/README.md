@@ -1,4 +1,4 @@
-# scopsDNS 2.1 / SCOPS window V8.16
+# scopsDNS 2.2 / SCOPS window V8.17
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
@@ -21,6 +21,11 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.17
+- **Find my PS2** (next to the PCSX2 Sockets box). For a real PS2 or PCSX2 PCAP Bridged: start the game's online menu on the PS2, then press it. The window checks every address on your network for a Sony network adapter (MAC starting 00:04:1F for the PS2 network adapter / PCSX2, or 00:13:15 / 00:15:C1 for a slim PS2; other Sony prefixes are listed as "other Sony device") and fills in the PS2 address. No router login needed, no admin rights. Turned off while the Sockets box is ticked.
+- **The local DNS fills it in by itself.** When the PS2 uses this PC as its DNS, its first lookup shows its address ("PS2 address seen" in the Log), and an empty PS2 address box is filled with it.
+- scopsDNS.py: `--find-ps2` prints the same search result (Windows, macOS, Linux). Mac: see README_MAC.txt (menu option 7, and option 3 suggests the address it finds).
 
 ## What changed in V8.16
 - **PCSX2 Sockets checkbox.** Tick it and the address becomes this PC's address (the network card picked above) and cannot be typed over. Untick it and the last PS2 address comes back.

@@ -1,0 +1,12 @@
+SCOPS window V8.17 - Find my PS2
+
+Real PS2 or PCSX2 PCAP Bridged hosts no longer need the router to find the PS2 address:
+1. Start the game's online menu on the PS2 (so its network is on).
+2. Press "Find my PS2" in the Hosting part of the window. The address is filled in.
+3. Press Check UPnP as before.
+
+If the PS2 already uses this PC's local DNS, its address is filled in by itself.
+PCSX2 Sockets: nothing changes (the box still uses this PC's address).
+
+The window title must say SCOPS V8.17.
+To update: close the SCOPS window and replace the whole folder with this one.

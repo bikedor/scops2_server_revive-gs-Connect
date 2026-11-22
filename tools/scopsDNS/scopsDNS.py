@@ -404,6 +404,114 @@ def _probe(server: str, name: str, qtype: int = QTYPE_A, qclass: int = 1, timeou
             "answers": _a_records(resp), "txt": _txt_records(resp), "local_reply": local}
 
 
+_SEEN_CONSOLES = set()
+
+# ---- Find my PS2 -------------------------------------------------------------------------------------------------
+# Sony's registered MAC prefixes (IEEE MA-L: 45 "Sony Interactive Entertainment Inc." + 00:22:A6 "Sony Computer
+# Entertainment America"; checked 2026-11-21 against maclookup.app). PS2 era: 00:04:1F (registered 2000-11-09, PS2
+# network adapter, also PCSX2's emulated adapter), 00:13:15 (2004-12-15, slim PS2: seen on a real console 2026-11-21)
+# and 00:15:C1 (2005-09-09, later slim PS2s, before the PS3). The others are later Sony devices (PS3/PS4/PS5, PSP...),
+# still listed so a PS2 on another prefix is not missed.
+PS2_ERA_OUIS = {"00041f", "001315", "0015c1"}
+SONY_OUIS = PS2_ERA_OUIS | {
+    "001315", "0015c1", "0019c5", "001d0d", "001fa7", "00248d", "00d9d1", "00e421", "04f778", "0c7043", "0cfe45",
+    "280dfc", "2840dd", "2c9e00", "2ccc44", "50b03b", "54e6fd", "5c843c", "5c9666", "68286c", "70662a", "709e29",
+    "78c881", "78e04d", "84e657", "904748", "98fa2e", "9c37cb", "a8e3ee", "b40ad8", "b41f4d", "bc3329", "bc60a7",
+    "c0151b", "c84aa0", "c863f1", "d4f7d5", "e86e3a", "ec748c", "f46412", "f8461c", "f8d0ac", "fc0fe6", "fcca40",
+    "0022a6"}
+
+
+def _norm_mac(m: str) -> str:
+    """'0:4:1f:82:a:b' (macOS), '00-04-1f-82-0a-0b' (Windows), '00:04:1F:..' -> '00041f820a0b' ('' if not a MAC)."""
+    parts = re.split(r"[:\-]", m.strip().lower())
+    if len(parts) != 6 or not all(re.fullmatch(r"[0-9a-f]{1,2}", x) for x in parts):
+        return ""
+    return "".join(x.zfill(2) for x in parts)
+
+
+def neighbour_table() -> dict:
+    """IPv4 address -> normalised MAC from the OS neighbour (ARP) table. No admin rights needed."""
+    osn = os_name()
+    out = ""
+    cmds = ([["arp", "-a"]] if osn == "Windows" else
+            [["arp", "-an"]] if osn == "macOS" else [["ip", "-4", "neigh"], ["arp", "-an"]])
+    for c in cmds:
+        try:
+            r = subprocess.run(c, capture_output=True, text=True, timeout=10)
+            if r.stdout.strip():
+                out = r.stdout
+                break
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if not out and osn == "Linux":
+        try:
+            out = open("/proc/net/arp").read()
+        except OSError:
+            pass
+    table = {}
+    for line in out.splitlines():
+        ipm = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", line)
+        macm = re.search(r"\b([0-9a-fA-F]{1,2}(?:[:\-][0-9a-fA-F]{1,2}){5})\b", line)
+        if ipm and macm:
+            mac = _norm_mac(macm.group(1))
+            if mac and mac not in ("000000000000", "ffffffffffff"):
+                table[ipm.group(1)] = mac
+    return table
+
+
+def _fmt_mac(m: str) -> str:
+    return ":".join(m[i:i + 2] for i in range(0, 12, 2))
+
+
+def find_ps2(my_ip: str, wait: float = 2.5) -> list:
+    """Nudge every address on this computer's /24 (one tiny UDP datagram to the discard port, so the OS looks up each
+    address on the network), then read the neighbour table and return the Sony devices, PS2-era first.
+    The PS2 only answers while its network is up (the game's online menu)."""
+    try:
+        net = ipaddress.IPv4Network(f"{my_ip}/24", strict=False)
+    except ValueError:
+        return []
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for host in net.hosts():
+            h = str(host)
+            if h == my_ip:
+                continue
+            try:
+                s.sendto(b"scops", (h, 9))
+            except OSError:
+                pass
+    finally:
+        s.close()
+    time.sleep(wait)
+    found = []
+    for ip, mac in neighbour_table().items():
+        try:
+            if ipaddress.IPv4Address(ip) not in net or ip == my_ip:
+                continue
+        except ValueError:
+            continue
+        if mac[:6] in SONY_OUIS:
+            found.append((0 if mac[:6] in PS2_ERA_OUIS else 1, ip, mac))
+    found.sort(key=lambda t: (t[0], tuple(int(x) for x in t[1].split("."))))
+    return found
+
+
+def report_find_ps2(my_ip: str) -> int:
+    say("INFO", f"Looking for a PS2 on {my_ip.rsplit('.', 1)[0]}.x (takes a few seconds). "
+                "The PS2 must be at the game's online menu so its network is on.")
+    found = find_ps2(my_ip)
+    if not found:
+        say("WARN", "PS2 NOT FOUND: no Sony network device answered. Start the game's online menu on the PS2 "
+                    "(past the network connection screen), check it is on the same network as this computer "
+                    "(not a guest Wi-Fi), then try again.")
+        return 1
+    for era, ip, mac in found:
+        kind = "PS2-era Sony network adapter (or PCSX2)" if era == 0 else "other Sony device (PS3/PS4/PS5?)"
+        say("INFO", f"{'PS2 FOUND' if era == 0 else 'SONY DEVICE'}: {ip} (MAC {_fmt_mac(mac)}, {kind})")
+    return 0
+
+
 def answer(data: bytes, client_ip: str, cfg) -> bytes | None:
     q = parse_question(data)
     if q is None:
@@ -411,6 +519,9 @@ def answer(data: bytes, client_ip: str, cfg) -> bytes | None:
         return None
     name, qtype, q_end = q
     if is_game_name(name):
+        if client_ip not in _SEEN_CONSOLES:
+            _SEEN_CONSOLES.add(client_ip)
+            say("INFO", f"PS2 address seen: {client_ip} (it asked this computer for {name}; use it for hosting)")
         if qtype in (QTYPE_A, 255):
             say("INFO", f"Console at {client_ip} looked up {name} -> {cfg.server} (SCOPS)")
         elif cfg.verbose:
@@ -1026,6 +1137,8 @@ def main(argv) -> int:
     ap.add_argument("--upnp", metavar="PS2", help="open router ports to this PS2 address (no prompt)")
     ap.add_argument("--no-upnp", action="store_true", help="DNS only; do not ask about UPnP")
     ap.add_argument("--dry-run", action="store_true", help="with firewall changes: only print the commands")
+    ap.add_argument("--find-ps2", action="store_true",
+                    help="look for the PS2 on this computer's network (Sony MAC address) and print its address, then exit")
     cfg = ap.parse_args(argv)
     try:
         ipaddress.IPv4Address(cfg.server)
@@ -1045,6 +1158,8 @@ def main(argv) -> int:
         else:
             say("WARN", f"{cfg.ip} is not an address of this computer (it has {', '.join(sorted(mine))}); "
                         f"showing {ip} instead.")
+    if cfg.find_ps2:
+        return report_find_ps2(ip)
     if cfg.check_only:
         say("INFO", f"This computer's address: {format_ip(ip)}")
         detect_dns_hijack(cfg.upstream, cfg.server)

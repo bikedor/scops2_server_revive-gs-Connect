@@ -383,6 +383,7 @@ function Start-LocalDns([string]$ip) {
     }
     Say "INFO" "TCP port 53 not used by the built-in version; UDP only (enough for the PS2)."
     Say "INFO" "scopsDNS is ready. Waiting for DNS requests from your console... (Ctrl+C to stop)"
+    $script:SeenConsoles = @{}
     while ($true) {
         try {
             $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
@@ -393,6 +394,10 @@ function Start-LocalDns([string]$ip) {
             $q = Get-Question $data
             if (-not $q) { Say "ERROR" "Invalid DNS request from $client"; continue }
             if (Test-GameName $q.name) {
+                if (-not $script:SeenConsoles.ContainsKey($client)) {
+                    $script:SeenConsoles[$client] = $true
+                    Say "INFO" "PS2 address seen: $client (it asked this computer for $($q.name); use it for hosting)"
+                }
                 if ($q.qtype -eq 1 -or $q.qtype -eq 255) { Say "INFO" "Console at $client looked up $($q.name) -> $Server (SCOPS)" }
                 $reply = New-GameAnswer $data $q.qend $q.qtype $Server
             } else {

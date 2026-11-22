@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.16
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.17
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -606,7 +606,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.16 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.17 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -887,7 +887,7 @@ function Get-ScopsReport {
     $routerName = ""
     if ($script:Brand) { $routerName = "$($script:Brand.Name) $($script:Brand.Model)".Trim() } elseif ($script:RouterInfo) { $routerName = $script:RouterInfo }
     $L = New-Object System.Collections.Generic.List[string]
-    $L.Add("=== SCOPS log (V8.16) ===")
+    $L.Add("=== SCOPS log (V8.17) ===")
     $L.Add("Time:      " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
     $L.Add("Windows:   $os, PowerShell $($PSVersionTable.PSVersion)")
     $L.Add("DNS tool:  $mode, $alive, mode=$($script:DnsMode), tries=$($script:DnsTries)")
@@ -1122,6 +1122,121 @@ $sockets.Add_CheckedChanged({
         $box.BackColor = [System.Drawing.SystemColors]::Window
         $lbl.Text = "PS2 address:"
         if ($script:ManualPs2) { $box.Text = $script:ManualPs2 }
+    }
+})
+
+# V8.17: Find my PS2. Real PS2 (or PCSX2 PCAP Bridged) on the same home network: nudge every address on the picked
+# card's /24 with one tiny UDP datagram (port 9), so Windows looks each one up, then read the neighbour (ARP) table and
+# keep Sony's registered MAC prefixes. PS2 era: 00:04:1F (2000, PS2 network adapter, also PCSX2), 00:13:15 (2004, slim
+# PS2: seen on a real console 2026-11-21) and 00:15:C1 (2005, later slims); the rest are later Sony devices
+# (PS3/PS4/PS5...). Same list as scopsDNS.py. No admin rights needed.
+$script:Ps2Ouis = @("00041f", "001315", "0015c1")
+$script:SonyOuis = @("00041f", "001315", "0015c1", "0019c5", "001d0d", "001fa7", "00248d", "00d9d1", "00e421", "04f778",
+    "0c7043", "0cfe45", "280dfc", "2840dd", "2c9e00", "2ccc44", "50b03b", "54e6fd", "5c843c", "5c9666", "68286c", "70662a",
+    "709e29", "78c881", "78e04d", "84e657", "904748", "98fa2e", "9c37cb", "a8e3ee", "b40ad8", "b41f4d", "bc3329", "bc60a7",
+    "c0151b", "c84aa0", "c863f1", "d4f7d5", "e86e3a", "ec748c", "f46412", "f8461c", "f8d0ac", "fc0fe6", "fcca40", "0022a6")
+
+function ConvertTo-MacKey([string]$m) {
+    $parts = @($m.Trim().ToLower() -split "[:\-]")
+    if ($parts.Count -ne 6) { return "" }
+    $out = ""
+    foreach ($x in $parts) { if ($x -notmatch "^[0-9a-f]{1,2}$") { return "" }; $out += $x.PadLeft(2, "0") }
+    if ($out -eq "000000000000" -or $out -eq "ffffffffffff") { return "" }
+    return $out
+}
+
+function Get-NeighbourMacs {
+    $t = @{}
+    try {
+        foreach ($n in @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop)) {
+            if ("$($n.State)" -in @("Unreachable", "Incomplete")) { continue }
+            $k = ConvertTo-MacKey "$($n.LinkLayerAddress)"
+            if ($k) { $t["$($n.IPAddress)"] = $k }
+        }
+    } catch {
+        try {
+            foreach ($l in @(& arp.exe -a 2>$null)) {
+                if ("$l" -match "^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})\s") {
+                    $k = ConvertTo-MacKey $Matches[2]
+                    if ($k) { $t[$Matches[1]] = $k }
+                }
+            }
+        } catch {}
+    }
+    return $t
+}
+
+function Find-Ps2Devices([string]$myIp) {
+    $base = $myIp.Substring(0, $myIp.LastIndexOf("."))
+    $u = New-Object System.Net.Sockets.UdpClient
+    $b = [System.Text.Encoding]::ASCII.GetBytes("scops")
+    for ($i = 1; $i -le 254; $i++) {
+        $t = "$base.$i"
+        if ($t -eq $myIp) { continue }
+        try { [void]$u.Send($b, $b.Length, $t, 9) } catch {}
+    }
+    $u.Close()
+    $until = (Get-Date).AddMilliseconds(2500)
+    while ((Get-Date) -lt $until) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+    $found = @()
+    $tab = Get-NeighbourMacs
+    foreach ($ip in $tab.Keys) {
+        if (-not $ip.StartsWith("$base.") -or $ip -eq $myIp) { continue }
+        $oui = $tab[$ip].Substring(0, 6)
+        if ($script:SonyOuis -contains $oui) {
+            $mac = ($tab[$ip] -split "(..)" | Where-Object { $_ }) -join ":"
+            $era = if ($script:Ps2Ouis -contains $oui) { 0 } else { 1 }
+            $found += New-Object PSObject -Property @{ Ip = $ip; Mac = $mac; Era = $era; Last = [int]$ip.Split(".")[3] }
+        }
+    }
+    return @($found | Sort-Object Era, Last)
+}
+
+$findBtn = New-Object System.Windows.Forms.Button
+$findBtn.Text = "Find my PS2"
+$findBtn.Location = New-Object System.Drawing.Point(420, 232)
+$findBtn.Size = New-Object System.Drawing.Size(120, 28)
+$form.Controls.Add($findBtn)
+$tip.SetToolTip($findBtn, "Real PS2 or PCSX2 PCAP Bridged: looks for the console on your network by its Sony network ID and fills in its address. Start the game's online menu first.")
+$sockets.Add_CheckedChanged({ $findBtn.Enabled = -not $sockets.Checked })
+$findBtn.Add_Click({
+    $myIp = Get-PickedIp
+    if (-not $myIp) {
+        Set-Status "bad" "No network card" @("Pick your Wi-Fi or Ethernet card at the top first.")
+        return
+    }
+    $findBtn.Enabled = $false
+    Set-Status "busy" "Looking for your PS2..." @(
+        "Checking every address on $($myIp.Substring(0, $myIp.LastIndexOf('.'))).x for a Sony network adapter (a few seconds).",
+        "The PS2 must be at the game's online menu so its network is on.")
+    $form.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+    try { $res = @(Find-Ps2Devices $myIp) } catch { $res = @(); Write-ScopsLog "Find my PS2 error: $($_.Exception.Message)" }
+    $findBtn.Enabled = -not $sockets.Checked
+    foreach ($r in $res) { Write-ScopsLog "Find my PS2: $($r.Ip) MAC $($r.Mac) era=$($r.Era)" }
+    $ps2s = @($res | Where-Object { $_.Era -eq 0 })
+    $others = @($res | Where-Object { $_.Era -ne 0 })
+    if ($ps2s.Count -ge 1) {
+        $box.Text = $ps2s[0].Ip
+        $lines = @("$($ps2s[0].Ip) has a PS2-era Sony network adapter (MAC $($ps2s[0].Mac)). Filled in above. Press Check UPnP.")
+        if ($ps2s.Count -gt 1) { $lines += "Also found: " + (($ps2s[1..($ps2s.Count - 1)] | ForEach-Object { $_.Ip }) -join ", ") + ". If the first is not your PS2, type one of these." }
+        if ($others.Count) { $lines += "Other Sony devices (PS3/PS4/PS5?): " + (($others | ForEach-Object { $_.Ip }) -join ", ") }
+        Set-Status "ok" "PS2 found: $($ps2s[0].Ip)" $lines
+    } elseif ($others.Count -eq 1) {
+        $box.Text = $others[0].Ip
+        Set-Status "warn" "Sony device found: $($others[0].Ip)" @(
+            "$($others[0].Ip) is a Sony device (MAC $($others[0].Mac)), but not one with the PS2's usual network ID.",
+            "Filled in above. If it is your PS3/PS4/PS5 instead of the PS2, check the address in the PS2's network settings.")
+    } elseif ($others.Count -gt 1) {
+        Set-Status "warn" "Several Sony devices, no PS2 ID" @(
+            "Found: " + (($others | ForEach-Object { "$($_.Ip) ($($_.Mac))" }) -join ", "),
+            "None has the PS2's usual network ID. Check the address in the PS2's network settings and type it above.")
+    } else {
+        Set-Status "warn" "PS2 not found" @(
+            "No Sony network device answered on this network.",
+            "  - Start the game's online menu on the PS2 (past the network connection screen), then press Find my PS2 again.",
+            "  - The PS2 and this PC must be on the same home network (not a guest Wi-Fi).",
+            "  - Or type the address from the PS2's network settings.")
     }
 })
 
@@ -1707,6 +1822,13 @@ function Start-ScopsDns {
                     $line = $script:DnsRead.ReadLine()
                     if ($null -eq $line) { break }
                     Write-ScopsLog "dns: $line"
+                    if ($line -match "PS2 address seen: (\d{1,3}(?:\.\d{1,3}){3})") {
+                        $seen = $Matches[1]
+                        if (-not $sockets.Checked -and -not $box.Text.Trim()) {
+                            $box.Text = $seen
+                            Write-ScopsLog "PS2 address filled from its DNS request: $seen"
+                        }
+                    }
                     if ($line -match "Primary DNS:\s+(\S+)") {
                         $dnsAddr.Text = "Put this in the PS2, both DNS entries:  $($Matches[1])"
                     }
