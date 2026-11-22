@@ -1,0 +1,8 @@
+SCOPS window V8.18
+
+Pick what you host with: Real PS2, PCSX2 PCAP Bridged, PCSX2 Sockets, or PS3 with PS2 support (untested).
+Find my PS2 / Find my PS3 fills the address. Sockets uses this PC.
+Copy puts the address on the clipboard.
+Closing while forwards are held asks first (not during a Windows shutdown).
+The title must say SCOPS V8.18.
+Replace the whole folder.

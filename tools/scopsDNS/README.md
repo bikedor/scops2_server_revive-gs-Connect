@@ -1,14 +1,15 @@
-# scopsDNS 2.2 / SCOPS window V8.17
+# scopsDNS 2.2 / SCOPS window V8.18
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
    Windows may say "Windows protected your PC" / unrecognized app: the program is not code-signed.
    Click **More info -> Run anyway**. If your antivirus blocks the exe, use **SCOPS_UPnP_Check.bat** instead (same window).
 2. **DNS** (everyone): follow the top of the window. Green check = put **38.49.212.120** in both DNS entries.
-3. **Hosting (UPnP)** (only if you host): press **Check UPnP**.
-   - PCSX2 in **Sockets** mode: tick **PCSX2 Sockets mode**. The address fills with this PC and locks. Windows asks once to allow UDP 3658 and 10070-10080.
-   - PCSX2 in **PCAP Bridged** mode: leave the box unticked and type the **PS2 Address** (Settings > Network & HDD, e.g. 192.168.1.240).
-   - Real PS2: leave the box unticked and type the console's address.
+3. **Hosting (UPnP)** (only if you host): pick what you host with, then press **Check UPnP**.
+   - **Real PS2** or **PCSX2 PCAP Bridged**: press **Find my PS2** (game at the online menu). Or type the address.
+   - **PCSX2 Sockets**: pick that. The address fills with this PC. Windows asks once to allow UDP 3658 and 10070-10080.
+   - **PS3 with PS2 support (untested)**: pick that and press **Find my PS3**. Only early PS3s play PS2 games (CECHA/CECHB fully, CECHC/CECHE partly). Find lists every Sony device that is not a PS2 (a PS4 or PS5 counts too), so check it picked the PS3. Hosting from a PS3 has not been tested on SCOPS yet.
+   - **Copy** puts the address on the clipboard.
    - Turn any **VPN off** while hosting.
 4. Leave the window open while you host; close it when you are done (that removes the forwards).
    With more than one joiner, have each wait 20-30 seconds after the previous one got in (unless the host is on a
@@ -21,6 +22,14 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.18
+- **Hosting with** picker: Real PS2, PCSX2 PCAP Bridged, PCSX2 Sockets, or PS3 with PS2 support (untested). Sockets still locks the address to this PC and opens the Windows firewall. The other three use Find.
+- **Find my PS3.** A PS3 that plays PS2 games uses its own network adapter, not a PS2-era ID, so Find looks for any later Sony ID. That includes a PS4 or PS5, so the window lists what it found and asks you to check.
+- **Find is faster.** It first uses devices Windows has seen in the last moments, and scans the network if the console is not among them (older entries are not trusted: the console may have a new address).
+- **Copy** next to the address.
+- **Close warning.** If the window is holding forwards, closing it asks before it removes them (not when Windows shuts down or signs out).
+- After a green check, the first line says the one next step: leave the window open, and which DNS address to put in.
 
 ## What changed in V8.17
 - **Find my PS2** (next to the PCSX2 Sockets box). For a real PS2 or PCSX2 PCAP Bridged: start the game's online menu on the PS2, then press it. The window checks every address on your network for a Sony network adapter (MAC starting 00:04:1F for the PS2 network adapter / PCSX2, or 00:13:15 / 00:15:C1 for a slim PS2; other Sony prefixes are listed as "other Sony device") and fills in the PS2 address. No router login needed, no admin rights. Turned off while the Sockets box is ticked.
