@@ -6,6 +6,9 @@ First time
 2. Right-click (or Control-click) "SCOPS Mac.command" and choose Open, then Open again.
    (macOS asks this once because the file is not from the App Store. A plain double-click works after that.)
    If macOS still refuses: System Settings > Privacy & Security, scroll down, click "Open Anyway".
+   If it says "you do not have appropriate access privileges" (this happens when the files were downloaded
+   from GitHub instead of the SCOPS_Mac zip): open Terminal, type  cd  and a space, drag this folder onto the
+   Terminal window, press Return, then type  chmod +x "SCOPS Mac.command"  and press Return. Open it again.
 3. If a box asks to install the "command line developer tools", click Install (this gives the Mac Python 3),
    wait for it to finish, then open SCOPS Mac.command again.
 
