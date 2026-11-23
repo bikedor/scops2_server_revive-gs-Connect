@@ -383,3 +383,52 @@ come from the live log's `GUARD peaks` lines.
 (room over, normal logout) -> no line. With FAIL_LOG off: no lines. Whole suite with FAIL_LOG off: identical except this
 scenario.
 
+## Room check: Game Type and mode (2026-11-20)
+
+`python tools/sim/room_kind_check.py .` drives the lobby server with fake messages: create labels, room update 31, START_MATCH 17,
+SUBMIT_MATCH 30, MATCH_FINISH 45. Rooms modelled on the logs and the 2026-11-20 captures: SNAKE Free (`0x13`, no scores), IY0
+Ranking (`0x0f`, scores; then a match without scores), STRIDERSTROKE created Ranking and switched to Free (`0x0f` -> `0x0b`,
+scores still sent), and Ranking Sabotage switched to Free Sabotage (`0x0e` -> `0x0a`). Checks: labels from bit 0x04 and the low
+2 bits, the switch lines, the "scores were sent although the room was Free" flag, `SCCT_RANKED_REQUIRE_RANKED=1` skipping the
+Free match, `SCCT_RANKED_MODE_BITS=1` recording Free Sabotage as SAB (UNK with it off), and unchanged replies (38/39). Result: PASS.
+
+## Fast resume flag (2026-11-20)
+
+`sc_fast_resume_log_only` replays 2026-11-19 23:46:20 (SNAKE strict host): IY0's link, quiet 689 s, is answered in 0.0 s at the
+round end and IY0's console leaves room 107 8.8 s later. With `SCCT_RELAY_FAST_RESUME_LOG` on: one `FAST RESUME` line and a
+`follow-up ... LEFT the room 8.8s` line; DORIAN_D's normal return (answered after 15.4 s) is not flagged; a fast answer the
+player stays through gets `follow-up ... stayed`. With it off: no FAST lines. The whole no-reply/strict session routes and
+delivers identically on and off. Result: pass (whole suite passes). The same rule run over the real relay log from
+2026-11-16 to 2026-11-20 finds exactly the two known cases (SNAKE 00:36:02, IY0 23:46:20) out of 129 round-end returns.
+
+## UPnP-open shadow (2026-11-21)
+
+`sc_upnp_open_shadow_log_only` replays 2026-11-21 01:19:16: COOLDOR (PCSX2 Sockets, UPnP forward reported 774 s earlier, router
+probe fresh 4/4) is judged strict when ANDROID-DOR's link gets no reply for 18 s on hole 45002. With `SCCT_RELAY_UPNP_OPEN_SHADOW`
+on: one `UPNP_OPEN shadow ... WOULD keep it open` line; a second host with no UPnP report gets `strict stands`. With it off: no
+lines. Both verdicts are strict either way, and the whole no-reply/strict session routes and delivers identically on and off.
+Result: pass (whole suite passes).
+
+## Pause shadow (2026-11-21)
+
+`sc_pause_shadow_log_only` replays 2026-11-21 03:20:29: COOLDOR judged strict on cold hole 45004; his last data on holes
+45001-45003 was 2 s before and he sent nothing anywhere until 5 s after. With `SCCT_RELAY_PAUSE_SHADOW` on: one `PAUSE shadow
+... WOULD cancel` line; a host sending every 0.2 s on another hole gets `verdict stands`. With it off: no lines. The whole
+no-reply/strict session routes and delivers identically on and off. Result: pass (whole suite passes).
+
+## Pause-aware strict verdict (2026-11-21)
+
+`sc_pause_aware_verdict` drives the real cold-hole detector: (A) COOLDOR 04:16:27 (4.1 s unanswered, last data elsewhere 1.8 s
+before, then silent) -> cancelled with `SCCT_RELAY_PAUSE_AWARE` on, strict with it off; (B) a strict host sending to its other
+players every 0.2 s -> strict either way, 0.1 s later with it on; (C) third paused test after two cancels -> strict at once;
+(D) whole no-reply/strict session: same deliveries and verdicts on and off. The whole suite was also run with the switch forced
+on: 45/45 new-behaviour scenarios pass, results identical. Real-log replay of the 10 cold-hole verdicts since 2026-11-16 using the
+relay's own host-silence lines: 6 stand, 4 would be cancelled (all COOLDOR 24.69.x, each in a 7.0-7.3 s host-wide silence).
+
+`sc_pause_group_count` (2026-11-21 05:21, first live cancel): two joiners' links hit the same ~5 s COOLDOR pause 0.1 s
+apart. Now they count as 1 cancel (the second logs "same pause as the previous cancel"); a later separate pause is cancel 2; a
+third gives strict at once; a real strict host that keeps sending is still strict 0.1 s later. Full suite 46/46, also with
+`SCCT_RELAY_PAUSE_AWARE` forced on.
+
+## Loop timing (`sc_loop_stats_log_only`)
+`SCCT_RELAY_LOOP_STATS` is off in code and log only. The scenario checks the latency buckets (p99 of 100 packets with one 6 ms and one 30 ms outlier is <10 ms), housekeeping and pause sums, the packets-waiting counts, one line per window with traffic, none for an idle window, and the reset. A live run of the real loop on localhost (beta settings from `run_public_test.bat`, relay ports 3658/10070-10080, ~1,400 game packets, 5 forced 3-packet NAT replies) gave game packets avg 0.03 ms in the server, max 0.2 ms, and 10 pauses of 25 ms, each with game packets queued behind it.

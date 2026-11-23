@@ -135,6 +135,46 @@ rem Fair-handout shadow (log only, nothing changes): 'FAIR shadow' lines when a 
 rem goes to another player's link, what the owner then got, and a 'FAIR summary' every 10 min. Data for a possible
 rem fair rule (warm holes only for the player they were warmed for).
 set SCCT_RELAY_FAIR_SHADOW=1
+rem Fast resume flag (log only, nothing changes): 'FAST RESUME' when the host answers a player's long-quiet link
+rem within 1 s at a round end (before its map load), and a follow-up saying whether that player left the room in the
+rem next 20 s. On 2026-11-19 the only two such fast answers (SNAKE 00:36, IY0 23:46) were both followed by a drop.
+set SCCT_RELAY_FAST_RESUME_LOG=1
+rem Watch links quiet 90 s or more (default 300): test rounds of 1-3 min leave links quiet only 107-260 s.
+rem Over 407 round-end returns (2026-11-16..20) both limits find the same two fast answers, so 90 adds no noise.
+set SCCT_RELAY_FAST_QUIET_S=90
+rem UPnP-open shadow (log only): when a host is judged strict but its SCOPS window reported a working
+rem UPnP forward and fresh router probes reached it, log that an open-host rule would keep it open.
+rem Routing does not change. Set to 0 to turn the lines off.
+set SCCT_RELAY_UPNP_OPEN_SHADOW=1
+rem Pause shadow (log only): after a strict verdict, say whether the host was just pausing (sent nothing on
+rem any other hole for 3s+, e.g. a match about to start) - then the verdict was a false alarm. Routing does not change.
+set SCCT_RELAY_PAUSE_SHADOW=1
+rem Pause-aware strict verdict (changes behaviour): before calling a host strict on a cold hole, wait up to 3s
+rem for it to send to anyone else. Silent everywhere = a pause (e.g. match about to start), verdict cancelled
+rem (max 2 per host). Set to 0 to go back to the old immediate verdict.
+set SCCT_RELAY_PAUSE_AWARE=1
+rem Loop timing (log only): every 5 min a LOOP STATS line - time relayed game packets spend in the server and in-loop pauses.
+set SCCT_RELAY_LOOP_STATS=1
+rem Ranked ladder (2026-11-20 captures): the room info's first byte has Game Type (bit 0x04 = Ranking) and mode
+rem (low 2 bits: 3 Neutralisation, 2 Sabotage, 1 Extraction); the server follows every switch in the room menu.
+rem Only record a match if the room was Ranking when it started (a room created Ranking and switched to Free
+rem keeps sending scores, seen with STRIDERSTROKE 2026-11-18/19):
+set SCCT_RANKED_REQUIRE_RANKED=1
+rem Record each match under its mode from the mode bits (the old exact-byte check gave UNK for some hosts):
+set SCCT_RANKED_MODE_BITS=1
+rem Per-mode Ranking tabs (captures 2026-11-20: the Ranking screen's L1 tab is sent as 0 Overall, 1 Extraction,
+rem 2 Sabotage, 3 Neutralisation). Keep Spy / Mercenary points per mode, and answer the Extraction, Sabotage and
+rem Neutralisation tabs from them. The Overall tab and the end-of-match results screen are unchanged.
+set SCCT_RANKED_MODE_SIDE_LEDGER=1
+set SCCT_RANKED_MODE_TABS=1
+rem 2026-11-23 tab test: the Game Statistics screen reads the played mode's tab on the player's side (as the original).
+rem Answer each tab's "my stats" from that mode, and floor points at 0 per mode and side (a loss at 0 shows 0 -> 0).
+set SCCT_RANKED_MYSTATS_TABS=1
+set SCCT_RANKED_MODE_FLOOR=1
+rem 2026-11-23 tests: when the host returns everyone to the lobby mid-match, every console sends all players as
+rem lost and no Game Statistics screen appears. Such a match, where nobody won, is not counted. A player who quits on his own still
+rem counts as a loss for his side, and the others get their win.
+set SCCT_RANKED_REQUIRE_WINNER=1
 rem Game check at login: only these games may log in (product id prefixes, comma separated). SC3PS2 = Chaos
 rem Theory, every region. Other Ubisoft PS2 games get the normal login failure. To host another game later, add it,
 rem e.g. SC3PS2,PTPS2 for Pandora Tomorrow. SCCT_GAME_CHECK: refuse (default), log (let in, only log), off.

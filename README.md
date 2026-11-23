@@ -190,6 +190,7 @@ Ranked matches need **4 players (2v2)**. The server records the result when the 
 - **Levels:** everyone starts at level 1 with 0 points; the cap is level 15. Leaving level L takes `50 x L x (L + 10)` points (550 to leave level 1), a curve fitted to the original server's ranking screenshots. The level shown is always the Overall level. `SCCT_LADDER_PTS_PER_LEVEL=<n>` switches to a simple linear curve.
 - **Revenge mode:** teams swap for round 2 and each round is scored on the role the player held in that round.
 - **Per-mode tracking:** the server records points, games, wins and time separately for **Neutralisation, Sabotage and Extraction** (`NEU_`, `SAB_`, `EXT_` keys in `state/ladder_stats.json`). The game's Ranking screen has no per-mode data (every mode tab shows the same Overall numbers; only the Spy/Mercenary switch changes them), so run `python tools/ladder_modes_report.py` for per-mode leaderboards (also written to `state/ladder_modes.txt`).
+- **Checking a ranked session:** double-click `Ranked report.bat` (or `python tools/ranked_report.py --last`). It lists every match with each player's side, result and points, says whether it counted, and flags anything odd: a Free match that counted, a Ranking match that did not, an unknown mode, results that disagree. It only reads `logs/router_wm_40005.log`.
 - **Automatic mode detection:** the first byte of the room's info blob tells the mode (`0x0d` Extraction, `0x0e` Sabotage, `0x0f` Neutralisation). It does not depend on the map and was confirmed on three maps per mode. To force a mode, put `NEU`, `SAB` or `EXT` in `state/ranked_mode.txt`; `AUTO`, an empty file or no file means detect. The file is read after every match, so no restart is needed.
 - **Not recorded:** a draw (all results 0), a match with fewer than 4 players, and a match that ends within 30 seconds (everyone backed out to the lobby).
 - **How it runs:** the Ranking screen is served by a second instance of the same server on port 44002 (`SCCT_LADDER_MODULE=1`, started by `tools\start_online_capture_ext.ps1`). It reads `state/ladder_stats.json` on every query, so edits show up without a restart. Registered users in `state/users.json` are added at level 1 / 0 points.
@@ -451,6 +452,7 @@ SCOPS Server.bat                  one-click launcher: stack + DNAS, press a key 
 scops_stop.ps1                    used by the launcher to stop the server's processes
 ubi-gs-new/                       newer ubi-gs snapshot used by the NAT service (MIT, see its LICENSE)
 tools/ladder_modes_report.py      per-mode leaderboards from state/ladder_stats.json
+tools/ranked_report.py            per-match ranked report from the router log, with flags (Ranked report.bat)
 tools/start_online_capture_ext.ps1  Windows start script for the whole stack
 run_test_keep.bat / run_test.bat  recommended settings / base settings
 run.sh                            Linux start script

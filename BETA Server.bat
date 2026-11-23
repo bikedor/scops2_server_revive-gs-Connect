@@ -2,6 +2,10 @@
 title SCOPS BETA launcher
 cd /d "%~dp0"
 
+rem Watchdog: restarts the BETA server if one of its processes crashes (never the main server). 0 = off.
+rem It only runs while this window and the beta's "SCOPS Server.bat" window are open. Log: logs\watchdog.log
+if not defined SCOPS_WATCHDOG set "SCOPS_WATCHDOG=1"
+
 rem Turn-key start for the SCOPS beta on the same VPS as the main server.
 rem   1. stops the main server if it is running (they share ports)
 rem   2. sets up Python (bundled pylib, plus the main server's .venv if it has one)
@@ -128,10 +132,19 @@ if not exist "logs\" mkdir logs
 echo.
 echo Starting the BETA server...
 echo.
+if exist "logs\watchdog.stop" del "logs\watchdog.stop"
+if not "%SCOPS_WATCHDOG%"=="1" goto wd_skip
+if not exist "%~dp0beta_watchdog.ps1" goto wd_skip
+start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0beta_watchdog.ps1" -MainDir "%MAIN_DIR%"
+echo Watchdog on: a crashed beta process is restarted automatically. Log: logs\watchdog.log
+:wd_skip
 rem Run it in a child cmd: its cleanup watcher then watches that child, not this window,
 rem so it cannot stop the main server after we restart it below.
 cmd /c ""%~dp0SCOPS Server.bat""
 cd /d "%~dp0"
+rem the beta was stopped on purpose: end the watchdog before anything else (it must never act after this)
+> "logs\watchdog.stop" echo stop
+if exist "%~dp0beta_watchdog.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0beta_watchdog.ps1" -EndWatchdog
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0beta_stop_running.ps1" -WaitWatchers
 
 if not defined MAIN_DIR goto end

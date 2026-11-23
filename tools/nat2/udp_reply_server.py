@@ -862,6 +862,7 @@ def hold_downgrade(host: str, why: str) -> None:
     st.pop("probe", None)
     log(f"HOLD: host {host} was judged open but {why}: strict after all - from now on a joiner waits on a cold hole "
         f"until the host's ping opens it")
+    upnp_open_shadow(host, f"downgraded from open: {why}")
 
 
 # No-reply verdict (SCCT_RELAY_HOLD_NOREPLY_STRICT, default on): a host still untested ("unknown") is judged strict when
@@ -892,6 +893,212 @@ def hold_noreply_verdict(host: str, hole: int, start: float, now: float, who: st
     log(f"HOLD: host {host} is strict (no port forward?): {who} got no reply for {now - start:.0f}s on hole {hole}, which "
         f"was dead when the link started ({ages}), while the host answered others. From now on a joiner waits on a cold "
         f"hole until the host's ping opens it")
+    upnp_open_shadow(host, f"no reply on dead hole {hole} for {now - start:.0f}s")
+    pause_shadow_note(host, hole, now, f"no reply on dead hole {hole} for {now - start:.0f}s")
+
+
+# ---- UPnP-open shadow (SCCT_RELAY_UPNP_OPEN_SHADOW, default OFF; LOG ONLY: no verdict or packet changes) ----
+# 2026-11-21 01:19:16 COOLDOR (PCSX2 Sockets, SCOPS window V8.16: UPnP 12/12 confirmed by the ASUS router, Windows
+# firewall rule in place) was judged strict when ONE link got no reply on a stale hole (45002, host silent 144 s), although
+# the server's router probe reached his PC from fresh ports 4/4 and he had answered two holes he never pinged. With a
+# forward the router cannot block that hole, so the silence was the game, not the NAT; the strict holds then added 16-27 s
+# waits. Same pattern 2026-11-16. These lines say when a host is judged strict although its own SCOPS window reported a
+# working forward and fresh router probes got through - data for a rule that would trust that evidence.
+UPNP_OPEN_SHADOW = os.environ.get("SCCT_RELAY_UPNP_OPEN_SHADOW", "0").strip().lower() in ("1", "on", "true", "yes")
+UPNP_OPEN_HINT_S = float(os.environ.get("SCCT_RELAY_UPNP_OPEN_HINT_S", "1800"))   # the window resends it every 20 min
+UPNP_OPEN_STATS = {"strict": 0, "would_open": 0}
+
+
+def upnp_open_shadow(host: str, why: str) -> None:
+    """Called right after a host is judged strict. Log only."""
+    if not UPNP_OPEN_SHADOW:
+        return
+    try:
+        now = time.monotonic()
+        UPNP_OPEN_STATS["strict"] += 1
+        hint = SHADOW_HINT.get(host)
+        pr = (SHADOW_EV.get(host) or {}).get("probe") or {}
+        fok, fmiss = int(pr.get("fresh_ok", 0)), int(pr.get("fresh_miss", 0))
+        hint_ok = hint is not None and now - hint <= UPNP_OPEN_HINT_S
+        hname = NAT_NAMES.get(host)
+        name = f"{hname} {host}" if hname else host
+        hint_txt = f"{now - hint:.0f}s ago" if hint is not None else "none"
+        if hint_ok and fok >= 1:
+            UPNP_OPEN_STATS["would_open"] += 1
+            log(f"UPNP_OPEN shadow: host {name} judged strict ({why}), but its SCOPS window reported a working UPnP forward "
+                f"{hint_txt} and {fok}/{fok + fmiss} fresh router probes reached it: an open-host rule WOULD keep it open "
+                f"(no holds) and move an unanswered link to a fresh hole instead. This run: strict verdicts "
+                f"{UPNP_OPEN_STATS['strict']}, would stay open {UPNP_OPEN_STATS['would_open']} (log only)")
+        else:
+            log(f"UPNP_OPEN shadow: host {name} judged strict ({why}); evidence of a forward: UPnP report {hint_txt}, "
+                f"fresh router probes {fok}/{fok + fmiss} seen -> strict stands (log only)")
+    except Exception as e:  # logging must never affect routing
+        log(f"UPNP_OPEN shadow error: {e!r}")
+
+
+# Pause shadow (SCCT_RELAY_PAUSE_SHADOW, log only). 2026-11-21 02:46:44 and 03:20:29, COOLDOR (PCSX2 Sockets, manual
+# forward, later also a Windows firewall rule; 4 s earlier at 03:20:07 he had answered an unsolicited packet on a
+# never-pinged hole in 0.1 s, so the forward worked): both times he was judged strict because a joiner's match-start link
+# (console port 10073) got nothing back on a cold hole for 4 s "while the host was sending on other holes" - but the
+# host's last data elsewhere was ~2 s before the verdict, and it then answered NOBODY for 7 s, not even links on holes it
+# was pinging (DORIAN_D's 10073 link on a warm hole waited 9.4 s too). That is the console pausing just before a match
+# starts, not a router blocking. This watches every strict verdict for PAUSE_CHECK_S and logs whether the host went
+# quiet on all its other holes for >= PAUSE_GAP_S in that time: if so, a pause-aware rule WOULD have cancelled the
+# verdict and tested again later. Routing does not change.
+PAUSE_SHADOW = os.environ.get("SCCT_RELAY_PAUSE_SHADOW", "0").strip().lower() in ("1", "on", "true", "yes")
+PAUSE_CHECK_S = float(os.environ.get("SCCT_RELAY_PAUSE_CHECK_S", "8"))
+PAUSE_GAP_S = float(os.environ.get("SCCT_RELAY_PAUSE_GAP_S", "3"))
+PAUSE_WATCH = {}
+# Loop timing (SCCT_RELAY_LOOP_STATS, off in code; log only). The relay is one loop: housekeeping runs on every pass,
+# and a multi-packet NAT reply sleeps GAP_S between packets, during which nothing else is forwarded. This measures, per
+# window of LOOP_STATS_S: how long each relayed game packet spent inside the server (from the loop noticing it to its
+# send), the housekeeping time per pass, and every in-loop pause (count, total, and whether packets arrived during it
+# and had to wait). Game packets = from a joiner on a relay port, or from a relayed host (its pings count too). One "LOOP STATS" line per window with traffic; nothing changes in routing or timing.
+LOOP_STATS = os.environ.get("SCCT_RELAY_LOOP_STATS", "0").strip().lower() in ("1", "on", "true", "yes")
+LOOP_STATS_S = float(os.environ.get("SCCT_RELAY_LOOP_STATS_S", "300"))
+LOOP_BUCKETS_MS = (0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0)
+
+
+class LoopStats:
+    def __init__(self, now: float):
+        self.reset(now)
+
+    def reset(self, now: float) -> None:
+        self.t0 = now
+        self.passes = 0
+        self.hk_sum = 0.0
+        self.hk_max = 0.0
+        self.game = [0] * (len(LOOP_BUCKETS_MS) + 1)   # in-server time of relayed game packets, histogram
+        self.game_n = 0
+        self.game_sum = 0.0
+        self.game_max = 0.0
+        self.other_n = 0
+        self.other_max = 0.0
+        self.pauses = 0
+        self.pause_sum = 0.0
+        self.pause_max = 0.0
+        self.pause_waiting = 0       # pauses at whose end packets were queued on a socket (they waited for it)
+        self.pause_game_waiting = 0  # ... of which a joiner relay (game) socket had data waiting
+
+    def housekeeping(self, dt: float) -> None:
+        self.passes += 1
+        self.hk_sum += dt
+        if dt > self.hk_max:
+            self.hk_max = dt
+
+    def packet(self, game: bool, dt: float) -> None:
+        if game:
+            ms = dt * 1000.0
+            k = 0
+            while k < len(LOOP_BUCKETS_MS) and ms >= LOOP_BUCKETS_MS[k]:
+                k += 1
+            self.game[k] += 1
+            self.game_n += 1
+            self.game_sum += dt
+            if dt > self.game_max:
+                self.game_max = dt
+        else:
+            self.other_n += 1
+            if dt > self.other_max:
+                self.other_max = dt
+
+    def pause(self, dt: float, waiting: bool, game_waiting: bool) -> None:
+        self.pauses += 1
+        self.pause_sum += dt
+        if dt > self.pause_max:
+            self.pause_max = dt
+        if waiting:
+            self.pause_waiting += 1
+        if game_waiting:
+            self.pause_game_waiting += 1
+
+    def pct(self, q: float) -> str:
+        """Upper edge of the bucket holding the q-quantile of game packets."""
+        if not self.game_n:
+            return "-"
+        need = q * self.game_n
+        acc = 0
+        for k, c in enumerate(self.game):
+            acc += c
+            if acc >= need:
+                return f"<{LOOP_BUCKETS_MS[k]:g}ms" if k < len(LOOP_BUCKETS_MS) else f">={LOOP_BUCKETS_MS[-1]:g}ms"
+        return "-"
+
+    def line(self, now: float) -> str | None:
+        if not (self.game_n or self.other_n or self.pauses):
+            return None
+        span = now - self.t0
+        slow = sum(self.game[k] for k in range(len(self.game)) if k >= LOOP_BUCKETS_MS.index(5.0) + 1)
+        return (f"LOOP STATS {span:.0f}s: game pkts {self.game_n} in server avg {self.game_sum / max(1, self.game_n) * 1000:.2f}ms "
+                f"p99 {self.pct(0.99)} max {self.game_max * 1000:.1f}ms, >=5ms {slow}; other pkts {self.other_n} "
+                f"max {self.other_max * 1000:.1f}ms; housekeeping {self.passes} passes avg "
+                f"{self.hk_sum / max(1, self.passes) * 1000:.2f}ms max {self.hk_max * 1000:.1f}ms; pauses {self.pauses} "
+                f"total {self.pause_sum * 1000:.0f}ms max {self.pause_max * 1000:.0f}ms, with packets waiting "
+                f"{self.pause_waiting} (game {self.pause_game_waiting})")
+
+    def tick(self, now: float) -> None:
+        if now - self.t0 >= LOOP_STATS_S:
+            ln = self.line(now)
+            if ln:
+                log(ln)
+            self.reset(now)
+
+
+# Pause-aware verdict (SCCT_RELAY_PAUSE_AWARE, off in code). The cold-hole test above no longer calls a host strict
+# the moment a link has gone 4 s unanswered: it first waits up to PAUSE_CONFIRM_S for the host to send game data to
+# anyone else. Seen -> the host is busy but ignoring this hole: strict, as before (a real strict host keeps sending to
+# its other players, so this costs it well under a second). Not seen -> the host is pausing everywhere (2026-11-21
+# COOLDOR, three false verdicts, each in a ~7 s pause): the verdict is cancelled and the host stays untested. At most
+# PAUSE_MAX_CANCELS cancels per host per run (cancels within PAUSE_GROUP_S of each other are one pause and count once);
+# after that the old immediate verdict applies.
+PAUSE_AWARE = os.environ.get("SCCT_RELAY_PAUSE_AWARE", "0").strip().lower() in ("1", "on", "true", "yes")
+PAUSE_CONFIRM_S = float(os.environ.get("SCCT_RELAY_PAUSE_CONFIRM_S", "3"))
+PAUSE_MAX_CANCELS = int(os.environ.get("SCCT_RELAY_PAUSE_MAX_CANCELS", "2"))
+PAUSE_GROUP_S = float(os.environ.get("SCCT_RELAY_PAUSE_GROUP_S", "10"))   # cancels this close together = one pause
+PAUSE_STATS = {"strict": 0, "paused": 0}
+
+
+def pause_shadow_note(host: str, port, now: float, why: str) -> None:
+    """Called right after a host is judged strict. Log only."""
+    if not PAUSE_SHADOW:
+        return
+    try:
+        others = [t for p, t in HOST_DATA.get(host, {}).items() if p != port]
+        last = max(others) if others else None
+        PAUSE_STATS["strict"] += 1
+        PAUSE_WATCH[host] = {"t": now, "port": port, "why": why,
+                             "gap": (now - last) if last is not None else 0.0, "last0": last}
+    except Exception as e:  # logging must never affect routing
+        log(f"PAUSE shadow error: {e!r}")
+
+
+def pause_shadow_tick(now: float) -> None:
+    if not PAUSE_SHADOW or not PAUSE_WATCH:
+        return
+    try:
+        for host, w in list(PAUSE_WATCH.items()):
+            others = [t for p, t in HOST_DATA.get(host, {}).items() if p != w["port"]]
+            last = max(others) if others else None
+            if last is not None:
+                w["gap"] = max(w["gap"], now - last)
+            if now - w["t"] < PAUSE_CHECK_S:
+                continue
+            PAUSE_WATCH.pop(host, None)
+            hname = NAT_NAMES.get(host)
+            name = f"{hname} {host}" if hname else host
+            lead = f"{w['t'] - w['last0']:.1f}s" if w["last0"] is not None else "never"
+            if w["gap"] >= PAUSE_GAP_S:
+                PAUSE_STATS["paused"] += 1
+                log(f"PAUSE shadow: host {name} judged strict ({w['why']}), but in the {PAUSE_CHECK_S:.0f}s around it the host "
+                    f"sent nothing on any other hole for {w['gap']:.1f}s (last data {lead} before the verdict): the host was "
+                    f"pausing (e.g. a match about to start), not blocking - a pause-aware rule WOULD cancel this verdict and "
+                    f"test again later. This run: strict verdicts {PAUSE_STATS['strict']}, during a host pause "
+                    f"{PAUSE_STATS['paused']} (log only)")
+            else:
+                log(f"PAUSE shadow: host {name} judged strict ({w['why']}); it kept sending on other holes (longest gap "
+                    f"{w['gap']:.1f}s in {PAUSE_CHECK_S:.0f}s) -> verdict stands (log only)")
+    except Exception as e:  # logging must never affect routing
+        log(f"PAUSE shadow error: {e!r}")
 
 
 def hold_state(host: str) -> str:
@@ -1147,6 +1354,10 @@ def hold_detect(now: float) -> None:
         pr = st.setdefault("probe", {})
         hd = HOST_DATA.get(host, {})
         hv = RELAY_HOSTS.get(host) or {}
+        if st.get("pause_wait"):
+            live = {(p, v[0]) for p, v in pr.items()}
+            for k in [k for k in st["pause_wait"] if k not in live]:
+                st["pause_wait"].pop(k, None)   # its test ended some other way
         for port, (t0, n, ep) in list(pr.items()):
             if hd.get(port, -1e9) >= t0:
                 back = hv.get("host_active_since", -1e9)
@@ -1197,13 +1408,52 @@ def hold_detect(now: float) -> None:
                     continue
                 if now - t0 < HOLD_DETECT_LATE_S:
                     continue
-            alive = [t for p, t in hd.items() if p != port and now - t <= 5.0]
-            if not alive:
-                continue                 # host not sending game data anywhere (loading a map): no verdict yet
+            pw = st.setdefault("pause_wait", {}) if PAUSE_AWARE else {}
+            if (port, t0) in pw:
+                # Pause-aware confirmation running (see PAUSE_AWARE): strict only once the host is seen sending to
+                # someone else AFTER the check started while this hole stays unanswered.
+                try:
+                    p_start = pw[(port, t0)]
+                    fresh = [t for p, t in hd.items() if p != port and t > p_start]
+                    if not fresh:
+                        if now - p_start < PAUSE_CONFIRM_S:
+                            continue
+                        pw.pop((port, t0), None)
+                        pr.pop(port, None)
+                        # One pause can catch several players' links at once (2026-11-21 05:21:27: two joiners who
+                        # joined together, both cancelled, "2 of 2" used up by a single pause). Cancels within
+                        # PAUSE_GROUP_S of the previous one belong to the same pause and count once.
+                        same = now - st.get("pause_last_cancel", -1e9) <= PAUSE_GROUP_S
+                        if not same:
+                            st["pause_cancels"] = st.get("pause_cancels", 0) + 1
+                        st["pause_last_cancel"] = now
+                        others = [t for p, t in hd.items() if p != port]
+                        quiet = now - max(others) if others else 0.0
+                        log(f"HOLD: host {host}: no reply on cold hole {port}, but the host has sent nothing on any other "
+                            f"hole for {quiet:.1f}s either: pausing (e.g. a match about to start), not blocking -> strict "
+                            f"verdict cancelled ({st['pause_cancels']} of {PAUSE_MAX_CANCELS}"
+                            + (", same pause as the previous cancel, not counted again" if same else "") + "); still testing")
+                        continue
+                    pw.pop((port, t0), None)   # host is talking to others but not on this hole: a real block
+                except Exception as e:   # never let the check stop the relay: fall back to the old verdict
+                    pw.pop((port, t0), None)
+                    log(f"PAUSE check error (old verdict used): {e!r}")
+            else:
+                alive = [t for p, t in hd.items() if p != port and now - t <= 5.0]
+                if not alive:
+                    continue             # host not sending game data anywhere (loading a map): no verdict yet
+                if PAUSE_AWARE and (st.get("pause_cancels", 0) < PAUSE_MAX_CANCELS
+                                    or now - st.get("pause_last_cancel", -1e9) <= PAUSE_GROUP_S):
+                    pw[(port, t0)] = now
+                    log(f"HOLD: host {host}: no reply on cold hole {port} for {now - t0:.1f}s; checking for up to "
+                        f"{PAUSE_CONFIRM_S:.0f}s that the host is still sending to others before calling it strict")
+                    continue
             st["state"] = "strict"
             log(f"HOLD: host {host} is strict (no port forward?): {_who(ep[0])}:{ep[1]} sent {n} packets into cold hole {port} "
                 f"in {now - t0:.1f}s and got nothing back while the host was sending on other holes. From now on a joiner "
                 f"waits on a cold hole until the host's ping opens it, and the ping goes to holes nothing was sent into")
+            upnp_open_shadow(host, f"nothing back on cold hole {port}")
+            pause_shadow_note(host, port, now, f"nothing back on cold hole {port}")
             break
         if st.get("state") != "unknown":
             st.pop("probe", None)
@@ -1358,6 +1608,8 @@ def reset_joiner(j: str, why: str) -> None:
     otherwise keep all slots and the new one's links are crammed into one (2026-11-04 19:13)."""
     n = 0
     tnow = time.monotonic()
+    if FAST_RESUME_LOG:
+        fast_resume_leave(j, why, tnow)
     for h, hv in RELAY_HOSTS.items():
         eps = [e for e in hv["eps"] if e[0] == j]
         if SILENCE_LOG:
@@ -1744,6 +1996,74 @@ def _bad_txt(host: str, now: float) -> str:
                     if now - t < BAD_HOLE_S)
 
 
+# ---- Fast resume flag (SCCT_RELAY_FAST_RESUME_LOG, default OFF; LOG ONLY: no packet is handled differently) ----
+# 2026-11-19 00:36 (STRIDERSTROKE host, SNAKE) and 23:46 (SNAKE host, IY0): at a round end each player's console wakes a link
+# that was quiet for 10+ min and the host answers it ~8-12 s later, after loading the next map. In 127 of 129 such returns
+# nobody dropped. In the other two the host answered within 0.1 s, before its map load; it then went quiet for the load
+# and ~6.5 s into that silence the player's console left the room (GROUP_LEAVE) and had to rejoin. These lines flag every
+# such fast answer and say whether that player left the room in the next FAST_WATCH_S seconds:
+#   FAST RESUME: <player> back after Ns quiet, answered by the host in 0.0s (before its map load) - watching 20 s
+#   FAST RESUME follow-up: <player> left the room 8.8s after the fast answer (GROUP_LEAVE ...) | stayed in the room
+FAST_RESUME_LOG = _env_on("SCCT_RELAY_FAST_RESUME_LOG", "0")
+FAST_QUIET_S = float(os.environ.get("SCCT_RELAY_FAST_QUIET_S", "300"))   # a link quiet this long woke at a round end
+FAST_WAIT_S = float(os.environ.get("SCCT_RELAY_FAST_WAIT_S", "1.0"))     # answered faster than this counts as fast
+FAST_WATCH_S = float(os.environ.get("SCCT_RELAY_FAST_WATCH_S", "20"))
+FAST_WATCH = {}        # joiner IP -> (t of the answer, endpoint, host, wait, quiet)
+FAST_STATS = {"fast": 0, "left": 0, "stayed": 0}
+_FAST_ERR = []
+
+
+def _fast_safe(fn):
+    def run(*a, **k):
+        if not FAST_RESUME_LOG or _FAST_ERR:
+            return None
+        try:
+            return fn(*a, **k)
+        except Exception as e:  # logging must never affect routing
+            _FAST_ERR.append(e)
+            log(f"FAST RESUME error (logging off from here): {e!r}")
+            return None
+    run.__name__ = fn.__name__
+    return run
+
+
+@_fast_safe
+def fast_resume_check(rec: dict, now: float, outcome: str) -> None:
+    """Called with every finished AGE record: flag a long-quiet in-game link that the host answered almost at once."""
+    if outcome != "answered" or rec.get("kind") != "resume" or rec.get("ctx") != "in-game":
+        return
+    quiet, wait = rec.get("quiet") or 0.0, now - rec["t0"]
+    if quiet < FAST_QUIET_S or wait >= FAST_WAIT_S:
+        return
+    ep, host = rec["ep"], rec["host"]
+    FAST_STATS["fast"] += 1
+    FAST_WATCH[ep[0]] = (now, ep, host, wait, quiet)
+    hname = NAT_NAMES.get(host)
+    log(f"FAST RESUME: {_who(ep[0])}:{ep[1]} back after {quiet:.0f}s quiet, answered by host {hname + ' ' if hname else ''}{host} "
+        f"in {wait:.1f}s (before its map load; usually 8-12 s) - watching {FAST_WATCH_S:.0f}s for a room leave (log only)")
+
+
+@_fast_safe
+def fast_resume_leave(j: str, why: str, now: float) -> None:
+    w = FAST_WATCH.get(j)
+    if w is None or not why.startswith("GROUP_LEAVE") or now - w[0] > FAST_WATCH_S:
+        return                      # other resets (a new join) keep watching; fast_resume_tick closes stale ones
+    FAST_WATCH.pop(j, None)
+    FAST_STATS["left"] += 1
+    log(f"FAST RESUME follow-up: {_who(j)}:{w[1][1]} LEFT the room {now - w[0]:.1f}s after the fast answer ({why}); "
+        f"this run: fast answers {FAST_STATS['fast']}, followed by a room leave {FAST_STATS['left']}, stayed {FAST_STATS['stayed']} (log only)")
+
+
+@_fast_safe
+def fast_resume_tick(now: float) -> None:
+    for j, w in list(FAST_WATCH.items()):
+        if now - w[0] > FAST_WATCH_S:
+            FAST_WATCH.pop(j, None)
+            FAST_STATS["stayed"] += 1
+            log(f"FAST RESUME follow-up: {_who(j)}:{w[1][1]} stayed in the room {FAST_WATCH_S:.0f}s after the fast answer; "
+                f"this run: fast answers {FAST_STATS['fast']}, followed by a room leave {FAST_STATS['left']}, stayed {FAST_STATS['stayed']} (log only)")
+
+
 # ---- AGE log (see AGE_LOG). Read-only: these functions only read relay state and write log lines. ----
 _AGE_ERR = []
 
@@ -1845,6 +2165,8 @@ def age_emit(rec: dict, now: float, outcome: str, via=None, why: str = "") -> No
     if why:
         parts.append(f"({why})")
     log(" ".join(parts))
+    if FAST_RESUME_LOG:
+        fast_resume_check(rec, now, outcome)
 
 
 @_age_safe
@@ -2949,6 +3271,18 @@ def main(argv=None) -> int:
             if UPNP_HINT else "off"))
         log(f"  FAIR SHADOW: " + (f"on (log only) - counts warm holes handed to another player's link and what that owner "
             f"then waited ('FAIR shadow' lines, summary every {FAIR_SUMMARY_S:.0f}s)" if FAIR_SHADOW else "off"))
+        log(f"  UPNP OPEN SHADOW: " + (f"on (log only) - when a host is judged strict, says whether its SCOPS window reported a "
+            f"working UPnP forward (last {UPNP_OPEN_HINT_S:.0f}s) and fresh router probes reached it ('UPNP_OPEN shadow' lines)"
+            if UPNP_OPEN_SHADOW else "off"))
+        log(f"  PAUSE AWARE: " + (f"on - a cold-hole strict verdict waits up to {PAUSE_CONFIRM_S:.0f}s for the host to send to "
+            f"someone else; if it is silent everywhere (a pause) the verdict is cancelled (max {PAUSE_MAX_CANCELS} pauses per host)"
+            if PAUSE_AWARE else "off"))
+        log(f"  PAUSE SHADOW: " + (f"on (log only) - after a host is judged strict, watches {PAUSE_CHECK_S:.0f}s and says "
+            f"whether the host went quiet on all its other holes for >={PAUSE_GAP_S:.0f}s (a pause, not a blocking router) "
+            f"('PAUSE shadow' lines)" if PAUSE_SHADOW else "off"))
+        log(f"  FAST RESUME: " + (f"on (log only) - flags a link quiet >{FAST_QUIET_S:.0f}s that the host answers in "
+            f"<{FAST_WAIT_S:.1f}s during a game, and whether that player leaves the room within {FAST_WATCH_S:.0f}s "
+            f"('FAST RESUME' lines)" if FAST_RESUME_LOG and AGE_LOG else "on, but no lines (needs AGE LOG)" if FAST_RESUME_LOG else "off"))
         log(f"  RELAY GUARD: " + (f"on (log only, nothing dropped) - per-link peak packets/s and largest packet, 'would-limit' "
             f"lines above {GUARD_PPS} pkt/s or {GUARD_MAX_PKT} B, summary every {GUARD_SUMMARY_S:.0f}s, unmapped senders counted"
             if GUARD_LOG else "off"))
@@ -2961,9 +3295,14 @@ def main(argv=None) -> int:
     else:
         log("  RELAY: off")
     all_socks = list(socks) + list(relay_socks) + ([ctrl_sock] if ctrl_sock is not None else [])
+    log(f"  LOOP STATS: " + (f"on (log only) - every {LOOP_STATS_S:.0f}s: time relayed game packets spend in the server, "
+        f"housekeeping per pass, and in-loop pauses ('LOOP STATS' lines)" if LOOP_STATS else "off"))
+    lstats = LoopStats(time.perf_counter()) if LOOP_STATS else None
     while True:
         r, _, _ = select.select(all_socks, [], [], 1.0 if RELAY_HOLES else 10.0)
         now = time.monotonic()
+        if lstats is not None:
+            p_wake = time.perf_counter()
         if RELAY_HOLES:
             hole_steering(now)
             hole_keepalive(now)
@@ -2982,6 +3321,10 @@ def main(argv=None) -> int:
             guard_tick(now)
         if FAIR_SHADOW:
             fair_tick(now)
+        if FAST_RESUME_LOG:
+            fast_resume_tick(now)
+        if PAUSE_SHADOW:
+            pause_shadow_tick(now)
         if RELAY_HOSTS:
             relay_expire(now)
             link_summary(now)
@@ -2990,6 +3333,9 @@ def main(argv=None) -> int:
             age_tick(now)
             if SHADOW:
                 shadow_tick(now)
+        if lstats is not None:
+            lstats.housekeeping(time.perf_counter() - p_wake)
+            lstats.tick(p_wake)
         for s in r:
             try:
                 data, addr = s.recvfrom(2048)
@@ -3004,6 +3350,8 @@ def main(argv=None) -> int:
                     relay_from_joiner(s, data, addr, now)
                 except Exception as e:
                     log(f"RELAY error from {addr[0]}:{addr[1]}: {e!r}")
+                if lstats is not None:
+                    lstats.packet(True, time.perf_counter() - p_wake)
                 continue
             try:
                 packets = handle_packet(data, addr, now, socks[s])
@@ -3014,8 +3362,20 @@ def main(argv=None) -> int:
                 continue
             for i, (pkt, dest) in enumerate(packets):
                 if i and GAP_S > 0:
-                    time.sleep(GAP_S)
+                    if lstats is not None:
+                        g0 = time.perf_counter()
+                        time.sleep(GAP_S)
+                        g1 = time.perf_counter()
+                        try:  # did packets arrive during the pause and wait for it? (peeks only; nothing is read)
+                            q, _, _ = select.select(all_socks, [], [], 0)
+                        except OSError:
+                            q = []
+                        lstats.pause(g1 - g0, bool(q), any(x in relay_socks for x in q))
+                    else:
+                        time.sleep(GAP_S)
                 s.sendto(pkt, dest)
+            if lstats is not None:
+                lstats.packet(addr[0] in RELAY_HOSTS, time.perf_counter() - p_wake)
 
 
 if __name__ == "__main__":

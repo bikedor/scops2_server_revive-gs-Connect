@@ -133,6 +133,31 @@ def _apply_room_overrides(room, *, log_fp=None) -> None:
         log_line(f"[{now_ts()}] ROOM_OVERRIDE applied: {applied}", log_fp=log_fp)
 
 
+
+# ---- Room game type and mode, from the room info blob (captures 2026-11-20) ----
+# First byte of the room info the host sends at CREATE_ROOM (12) and every room update (31):
+#   bit 0x04 = Game Type Ranking (clear = Free); low 2 bits = mode: 3 Neutralisation, 2 Sabotage, 1 Extraction.
+#   Ranking+NEU 0x0f, Free+NEU 0x0b, Ranking+SAB 0x0e, Ranking+EXT 0x0d, Free+EXT 0x09, Free+SAB 0x0a.
+#   Other bits (0x08, 0x10) vary between hosts and are not used.
+_ROOM_MODE_BITS = {3: "NEU", 2: "SAB", 1: "EXT"}
+
+
+def room_flags(info) -> tuple:
+    """(ranked: bool or None, mode: 'NEU'/'SAB'/'EXT'/'UNK') from a room info blob; (None, 'UNK') if there is none."""
+    try:
+        b0 = bytes(info or b"")[0]
+    except Exception:
+        return None, "UNK"
+    return bool(b0 & 0x04), _ROOM_MODE_BITS.get(b0 & 0x03, "UNK")
+
+
+def room_flags_text(info) -> str:
+    rk, md = room_flags(info)
+    if rk is None:
+        return "unknown"
+    return f"{'RANKING' if rk else 'FREE'} {md} (byte 0x{bytes(info)[0]:02x})"
+
+
 def _room_name_from_blob(info_blob: bytes) -> str:
     """Best-effort map/room name embedded in the 96-byte info blob (e.g. 'Cinema')."""
     try:
@@ -1963,6 +1988,32 @@ def handle_message(
                 def _num(v):
                     try: return int(float(v))
                     except Exception: return 0
+                # Per-mode Ranking tabs (captures 2026-11-20): request field 4 is the tab, 0 Overall, 1 Extraction, 2 Sabotage,
+                # 3 Neutralisation; the columns asked for are the same (GEN_/SPY_/SEN_) on every tab. SCCT_RANKED_MODE_TABS=1 answers
+                # tabs 1-3 from that mode's ledger (<MODE>_GEN_/_SPY_/_SEN_ keys). The "my stats" query (type 2) always stays on the
+                # overall numbers: the end-of-match results screen takes its Old Total from it. Level stays the overall level.
+                try:
+                    _tab = str(_rq[3])
+                except Exception:
+                    _tab = "0"
+                _tmode = {"1": "EXT", "2": "SAB", "3": "NEU"}.get(_tab)
+                # SCCT_RANKED_MYSTATS_TABS=1 (2026-11-23 tab test: Game Statistics reads the played mode's tab on the
+                # player's side): the "my stats" query (type 2) on tabs 1-3 is answered from that mode too.
+                _mystats_tabs = os.environ.get("SCCT_RANKED_MYSTATS_TABS", "0").strip().lower() in ("1", "on", "true", "yes")
+                if (_tmode and (_qtype != "2" or _mystats_tabs)
+                        and os.environ.get("SCCT_RANKED_MODE_TABS", "0").strip().lower() in ("1", "on", "true", "yes")):
+                    _mv = {}
+                    for _n, _st0 in _db.items():
+                        _v = {"GEN_LEVEL": _st0.get("GEN_LEVEL", 1)}
+                        for _side in ("SPY", "SEN"):
+                            for _f in ("SCORE", "GAMES", "WON", "TIME"):
+                                _v[f"{_side}_{_f}"] = _num(_st0.get(f"{_tmode}_{_side}_{_f}", 0))
+                        _v["GEN_SCORE"] = _v["SPY_SCORE"] + _v["SEN_SCORE"]
+                        for _f in ("GAMES", "WON", "TIME"):
+                            _v[f"GEN_{_f}"] = _v[f"SPY_{_f}"] + _v[f"SEN_{_f}"]
+                        _mv[_n] = _v
+                    _db = _mv
+                    log_line(f"[{now_ts()}] LADDER_MODULE mode tab {_tab} ({_tmode}): answering from the {_tmode} ledger", log_fp=log_fp)
                 _ranked = sorted(_db.keys(), key=lambda n: (-_num(_db[n].get(_skey, 0)), n.upper()))
                 def _row_for(name):
                     st = dict(_db.get(name) or {})
@@ -2005,11 +2056,23 @@ def handle_message(
                 _rows = [_row_for(n) for n in _names]
                 # Diagnostic (only while state/ladder_diag.flag exists): the post-match "my stats" query gets recognisable
                 # score values (GEN 333 / SPY 555 / SEN 777) so the Game Statistics "Old Total" shows which column it reads.
+                # Tab test (state/ladder_diag.flag containing "tabs"): each Ranking tab's "my stats" answer gets its own
+                # recognisable Spy/Mercenary numbers, so the Old Total on the Game Statistics screen shows which tab (and
+                # which side column) the game reads: Overall 300/400, Extraction 1100/1200, Sabotage 2100/2200,
+                # Neutralisation 3100/3200 (Spy/Mercenary). Display only: recording still uses the real totals.
                 try:
-                    if _qtype == "2" and (_sp.parent / "ladder_diag.flag").exists() and (_sp.parent / "ladder_diag.flag").read_text(encoding="utf-8-sig", errors="ignore").strip().lower() == "diag":
+                    _dflag = _sp.parent / "ladder_diag.flag"
+                    _dmode = _dflag.read_text(encoding="utf-8-sig", errors="ignore").strip().lower() if (_qtype == "2" and _dflag.exists()) else ""
+                    if _dmode == "diag":
                         _dv = {"GEN_SCORE": "333", "SPY_SCORE": "555", "SEN_SCORE": "777"}
                         _rows = [[_dv.get(c, v) for c, v in zip(_cols, r)] for r in _rows]
                         log_line(f"[{now_ts()}] LADDER_MODULE DIAG my-stats values for {_qargs}: {_rows}", log_fp=log_fp)
+                    elif _dmode == "tabs":
+                        _tb = {"0": 0, "1": 1000, "2": 2000, "3": 3000}.get(_tab, 0)
+                        _dv = {"SPY_SCORE": str(_tb + (100 if _tb else 300)), "SEN_SCORE": str(_tb + (200 if _tb else 400))}
+                        _dv["GEN_SCORE"] = str(int(_dv["SPY_SCORE"]) + int(_dv["SEN_SCORE"]))
+                        _rows = [[_dv.get(c, v) for c, v in zip(_cols, r)] for r in _rows]
+                        log_line(f"[{now_ts()}] LADDER_MODULE TAB TEST tab {_tab} ({ {'0': 'Overall', '1': 'Extraction', '2': 'Sabotage', '3': 'Neutralisation'}.get(_tab, '?') }) my-stats values for {_qargs}: {_rows}", log_fp=log_fp)
                 except Exception as _e:
                     log_line(f"[{now_ts()}] LADDER_MODULE diag error: {_e!r}", log_fp=log_fp)
                 if not _rows and _qtype in ("1", "2"):
@@ -2718,6 +2781,15 @@ def handle_message(
                 except Exception:
                     pass
 
+            try:   # Game Type and mode the room was created with (log only); a new room never inherits old labels
+                _rk = _lobby_state.__dict__.setdefault("room_kind", {})
+                for _k in [k for k in _rk if k == str(rid) or k.startswith(str(rid) + ":")]:
+                    _rk.pop(_k, None)
+                _rk[str(rid) + ":created"] = room_flags_text(getattr(room, "info", b""))
+                log_line(f"[{now_ts()}] ROOM_KIND room {rid} created: {_rk[str(rid) + ':created']}", log_fp=log_fp)
+            except Exception as _e:
+                log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
+
             # SCCT_CREATE_ACK=roomid: reply S->P in the same shape JOIN_LOBBY uses
             # (LOBBY_MSG, ['38', ['12', [room_id]]]). Default keeps the old reply.
             _ca = os.environ.get("SCCT_CREATE_ACK", "legacy").strip().lower()
@@ -2919,6 +2991,8 @@ def handle_message(
                 _lobby_state.__dict__["next_match_id"] = _mid + 1
                 _matches[_rid] = {"id": _mid, "order": [], "values": {}, "players": [str(v.get("username")) for _k, v in _room_targets(_rid)]}
                 log_line(f"[{now_ts()}] RANKED_FLOW match {_mid} started in room {_rid}, players={_matches[_rid]['players']}", log_fp=log_fp)
+                # Ranked / free label (log only). The room blob does not say it plainly, so the label comes from what the
+                # consoles did in this room's earlier matches: a ranked room sends scores (msg 30), a free room never does.
                 # Round 72: log every room field that could carry the game mode (Extraction / Sabotage / Neutralisation)
                 try:
                     for _rm in _lobby_state.get_rooms():
@@ -2926,8 +3000,17 @@ def handle_message(
                             _inf = bytes(_rm.info or b"")
                             _matches[_rid]["modeinfo"] = _inf[:16].hex()
                             log_line(f"[{now_ts()}] RANKED_FLOW MODE_INFO room={_rid} config=0x{int(_rm.config):x} start_args={_raw_args} info_head={_inf[:16].hex()} info_ascii={_inf[:48]!r}", log_fp=log_fp)
+                            _rk0, _md0 = room_flags(_inf)
+                            _matches[_rid]["ranked_at_start"] = _rk0
+                            _matches[_rid]["mode_at_start"] = _md0
+                            _matches[_rid]["kind_text"] = room_flags_text(_inf)
                 except Exception as _e:
                     log_line(f"[{now_ts()}] RANKED_FLOW MODE_INFO failed: {_e!r}", log_fp=log_fp)
+                try:   # Game Type and mode this match starts with (log only)
+                    _created = _lobby_state.__dict__.setdefault("room_kind", {}).get(str(_rid) + ":created", "not seen (room made before this server start)")
+                    log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_mid} starts: {_matches[_rid].get('kind_text', 'unknown')}; room created as {_created}", log_fp=log_fp)
+                except Exception as _e:
+                    log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                 _push_room(_rid, 62, [str(_rid), str(_mid)])
                 return _lobby_reply(msg, lobby_subtype, [_rid])
             if lobby_subtype == 30:
@@ -2962,26 +3045,6 @@ def handle_message(
                             _sdb = _json.loads(_spath.read_text(encoding="utf-8-sig")) if _spath.exists() else {}
                         except Exception:
                             _spath, _sdb = None, {}
-                        for _ix, _n in enumerate(_m["order"]):
-                            _arr = [str(x) for x in (_m["values"][_n] if isinstance(_m["values"][_n], list) else [])][:22]
-                            _arr += ["0"] * (22 - len(_arr))
-                            try: _res = int(_arr[1])
-                            except Exception: _res = 0
-                            _delta = _WIN if _res > 0 else (-_LOSS if _res < 0 else 0)
-                            _rk = "SPY" if _arr[0] == "0" else "SEN"
-                            # the client's Old Total comes from the role column (SPY_/SEN_), so the floor is applied on that
-                            _old = int(float((_sdb.get(_n) or {}).get(_rk + "_SCORE", 0) or 0))
-                            _new = max(0, _old + _delta)
-                            _plan.append((_n, _arr[0], _res, _delta, _arr[3]))
-                            if _diag:
-                                if _arr[0] == "0":
-                                    _arr[6] = str(600 + _ix); _arr[7] = str(700 + _ix); _arr[8] = "1"
-                                else:
-                                    _arr[8] = "0"; _arr[12] = str(1200 + _ix); _arr[13] = str(1300 + _ix)
-                            else:
-                                # screen mapping found in round 67: with arr[8]!=0 the "Game Results" column shows arr[7]
-                                _arr[7] = str(_new - _old); _arr[6] = str(_new); _arr[8] = "1"
-                            _rows.append([_n, _arr])
                         # Round 72: which game mode was this? state/ranked_mode.txt (NEU / SAB / EXT) set by the operator; otherwise UNK
                         _MODES = {"NEU": "NEU", "NEUTRALISATION": "NEU", "NEUTRALIZATION": "NEU", "SAB": "SAB", "SABOTAGE": "SAB", "EXT": "EXT", "EXTRACTION": "EXT"}
                         # Round 78: automatic detection from the room info blob (first byte: 0x0d Extraction, 0x0e Sabotage,
@@ -2999,15 +3062,81 @@ def handle_message(
                                 _mkey = _AUTO.get(int(str(_m.get("modeinfo", ""))[:2], 16), "UNK")
                             except Exception:
                                 _mkey = "UNK"
+                            # 2026-11-20 captures: the mode is the low 2 bits only (Free rooms are 0x09/0x0a/0x0b, and some hosts
+                            # set other bits), so the whole-byte table above gives UNK for them. SCCT_RANKED_MODE_BITS=1 reads the bits.
+                            _mbits = _m.get("mode_at_start") or "UNK"
+                            if os.environ.get("SCCT_RANKED_MODE_BITS", "0").strip().lower() in ("1", "on", "true", "yes"):
+                                _mkey = _mbits
+                            elif _mbits != _mkey:
+                                log_line(f"[{now_ts()}] RANKED_FLOW mode by bits would be {_mbits} (SCCT_RANKED_MODE_BITS=1); recording as {_mkey}", log_fp=log_fp)
                             log_line(f"[{now_ts()}] RANKED_FLOW mode auto-detected: {_mkey} (info_head={_m.get('modeinfo')!r}, file={_mtxt!r})", log_fp=log_fp)
+                        # SCCT_RANKED_MODE_FLOOR=1: floor at 0 per mode and side (needs the mode-and-side ledger and a known mode)
+                        _mode_floor = (_mkey != "UNK" and not _diag
+                                       and os.environ.get("SCCT_RANKED_MODE_FLOOR", "0").strip().lower() in ("1", "on", "true", "yes")
+                                       and os.environ.get("SCCT_RANKED_MODE_SIDE_LEDGER", "0").strip().lower() in ("1", "on", "true", "yes"))
+                        # 2026-11-23 tests: when the HOST returns everyone to the lobby mid-match, all consoles send the last
+                        # standing with every player at -1 (both sides lost) and no Game Statistics screen appears. A player who
+                        # quits on his own stays in the list as a loss for his side and the others still get a winner.
+                        # SCCT_RANKED_REQUIRE_WINNER=1: a match where nobody won is not recorded and shows 0 for everyone.
+                        _nobody_won = True
+                        for _n0 in _m["order"]:
+                            try:
+                                if int(str((_m["values"][_n0] if isinstance(_m["values"][_n0], list) else ["0", "0"])[1])) > 0:
+                                    _nobody_won = False
+                            except Exception:
+                                pass
+                        _req_win = os.environ.get("SCCT_RANKED_REQUIRE_WINNER", "0").strip().lower() in ("1", "on", "true", "yes")
+                        _skip_nowin = _nobody_won and _req_win and not _diag
+                        for _ix, _n in enumerate(_m["order"]):
+                            _arr = [str(x) for x in (_m["values"][_n] if isinstance(_m["values"][_n], list) else [])][:22]
+                            _arr += ["0"] * (22 - len(_arr))
+                            try: _res = int(_arr[1])
+                            except Exception: _res = 0
+                            _delta = _WIN if _res > 0 else (-_LOSS if _res < 0 else 0)
+                            if _skip_nowin:
+                                _delta = 0
+                            _rk = "SPY" if _arr[0] == "0" else "SEN"
+                            # the client's Old Total comes from the role column (SPY_/SEN_), so the floor is applied on that
+                            _old = int(float((_sdb.get(_n) or {}).get(_rk + "_SCORE", 0) or 0))
+                            if _mode_floor:
+                                # 2026-11-23 tab test: the Game Statistics screen reads the played mode's tab on the player's
+                                # side, so the floor is applied on that mode-and-side total (<MODE>_SPY_/_SEN_SCORE) and the
+                                # change actually applied is what every total gets (a loss at 0 in this mode shows 0 -> 0).
+                                _old = int(float((_sdb.get(_n) or {}).get(f"{_mkey}_{_rk}_SCORE", 0) or 0))
+                            _new = max(0, _old + _delta)
+                            _plan.append((_n, _arr[0], _res, (_new - _old) if _mode_floor else _delta, _arr[3]))
+                            if _diag:
+                                if _arr[0] == "0":
+                                    _arr[6] = str(600 + _ix); _arr[7] = str(700 + _ix); _arr[8] = "1"
+                                else:
+                                    _arr[8] = "0"; _arr[12] = str(1200 + _ix); _arr[13] = str(1300 + _ix)
+                            else:
+                                # screen mapping found in round 67: with arr[8]!=0 the "Game Results" column shows arr[7]
+                                _arr[7] = str(_new - _old); _arr[6] = str(_new); _arr[8] = "1"
+                            _rows.append([_n, _arr])
                         _min_pl = int(os.environ.get("SCCT_RANKED_MIN_PLAYERS", "4"))
                         # Round 79: a match that ends within seconds (everyone backed out to the lobby) is not a real match.
                         _min_sec = int(os.environ.get("SCCT_RANKED_MIN_SECONDS", "30"))
                         try: _maxsec = max(int(p_[4]) for p_ in _plan) if _plan else 0
                         except Exception: _maxsec = 0
+                        if _plan and _nobody_won and any(p_[2] for p_ in _plan):
+                            if _skip_nowin:
+                                log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} not recorded (nobody won: every player was sent as lost, the host returned to the lobby)", log_fp=log_fp)
+                                _plan = []
+                            else:
+                                log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} nobody won (host returned to the lobby?); recorded as before (SCCT_RANKED_REQUIRE_WINNER=1 would skip it)", log_fp=log_fp)
                         if _plan and _maxsec < _min_sec:
                             log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} not recorded (too short: {_maxsec}s < {_min_sec}s)", log_fp=log_fp)
                             _plan = []
+                        # 2026-11-20: a room created Ranking and switched to Free keeps sending scores (STRIDERSTROKE, 18 matches
+                        # on 2026-11-18/19). SCCT_RANKED_REQUIRE_RANKED=1 records a match only if its room was set to Ranking when
+                        # the match started. Off: recorded as before, with a log line saying what the rule would do.
+                        if _plan and _m.get("ranked_at_start") is False:
+                            if os.environ.get("SCCT_RANKED_REQUIRE_RANKED", "0").strip().lower() in ("1", "on", "true", "yes"):
+                                log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} not recorded (room was set to Free when the match started: {_m.get('kind_text')})", log_fp=log_fp)
+                                _plan = []
+                            else:
+                                log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} room was Free at match start but scores were sent; recorded as before (SCCT_RANKED_REQUIRE_RANKED=1 would skip it)", log_fp=log_fp)
                         if len(_plan) >= _min_pl and any(p_[2] for p_ in _plan) and _spath is not None:
                             def _apply(_plan=_plan, _spath=_spath, _mid=_m["id"], _mkey=_mkey):
                                 try:
@@ -3031,6 +3160,18 @@ def handle_message(
                                         _st[_mkey + "_GAMES"] = int(_st.get(_mkey + "_GAMES", 0) or 0) + 1
                                         _st[_mkey + "_WON"] = int(_st.get(_mkey + "_WON", 0) or 0) + (1 if _res > 0 else 0)
                                         _st[_mkey + "_TIME"] = int(_st.get(_mkey + "_TIME", 0) or 0) + _t
+                                    # Per mode and side (SCCT_RANKED_MODE_SIDE_LEDGER=1): <MODE>_SPY_/<MODE>_SEN_ SCORE/GAMES/WON/TIME,
+                                    # read by the per-mode Ranking tabs. Only adds keys; nothing above changes. Not for UNK.
+                                    if _mkey != "UNK" and os.environ.get("SCCT_RANKED_MODE_SIDE_LEDGER", "0").strip().lower() in ("1", "on", "true", "yes"):
+                                        for _n, _team, _res, _delta, _tm in _plan:
+                                            _st = _d.setdefault(_n, {})
+                                            _sd = _mkey + ("_SPY" if _team == "0" else "_SEN")
+                                            try: _t = max(0, int(_tm))
+                                            except Exception: _t = 0
+                                            _st[_sd + "_SCORE"] = max(0, int(_st.get(_sd + "_SCORE", 0) or 0) + _delta)
+                                            _st[_sd + "_GAMES"] = int(_st.get(_sd + "_GAMES", 0) or 0) + 1
+                                            _st[_sd + "_WON"] = int(_st.get(_sd + "_WON", 0) or 0) + (1 if _res > 0 else 0)
+                                            _st[_sd + "_TIME"] = int(_st.get(_sd + "_TIME", 0) or 0) + _t
                                     for _st in _d.values():  # overall = spy + mercenary totals
                                         _st["GEN_SCORE"] = int(_st.get("SPY_SCORE", 0) or 0) + int(_st.get("SEN_SCORE", 0) or 0)
                                     _spath.write_text(_json.dumps(_d, indent=1), encoding="utf-8")
@@ -3047,6 +3188,24 @@ def handle_message(
                     else:
                         _final = [str(_m["id"]), "39", ["0"]]
                     log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} finished: {_final}", log_fp=log_fp)
+                    # Game Type label (log only): reply and recording above are unchanged.
+                    try:
+                        _rk0 = _m.get("ranked_at_start"); _kt = _m.get("kind_text", "unknown")
+                        _n = len(_m["order"])
+                        if _rk0 is None:
+                            _what = f"scores from {_n} player(s)" if _n else "no scores"
+                        elif _rk0 and _n:
+                            _what = f"scores from {_n} player(s) {_m['order']}"
+                        elif _rk0:
+                            _what = "no scores this match (everyone left early or the round was cut short); nothing to record"
+                        elif _n:
+                            _what = (f"scores were sent although the room was Free at match start (room created as "
+                                     f"{_lobby_state.__dict__.get('room_kind', {}).get(str(_rid) + ':created', 'unknown')})")
+                        else:
+                            _what = "no scores, nothing to record; normal for a Free room"
+                        log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_m['id']} ended: {_kt} - {_what}", log_fp=log_fp)
+                    except Exception as _e:
+                        log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                     _push_room(_rid, 71, _final)
                 else:
                     log_line(f"[{now_ts()}] RANKED_FLOW MATCH_FINISH for room {_rid} with no running match", log_fp=log_fp)
@@ -3085,6 +3244,11 @@ def handle_message(
                             for _inf in _lobby_state.rooms.values():
                                 if str(_inf["room"].group_id) == _rid:
                                     _room = _inf["room"]
+                                    try:   # host switched Game Type or mode (log only)
+                                        if room_flags(_room.info) != room_flags(_blob):
+                                            log_line(f"[{now_ts()}] ROOM_KIND room {_rid} switched: {room_flags_text(_room.info)} -> {room_flags_text(_blob)}", log_fp=log_fp)
+                                    except Exception as _e:
+                                        log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                                     _room.info = bytes(_blob)
                                     if getattr(_room, "real_ip_addr", ""):
                                         _room.info = _rewrite_room_blob(_room.info, str(_room.ip_addr))  # keep the relay address after a map/settings change

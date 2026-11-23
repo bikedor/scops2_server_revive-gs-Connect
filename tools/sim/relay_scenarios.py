@@ -1764,6 +1764,342 @@ def sc_fair_shadow_log_only(new):
 SCENARIOS.append(sc_fair_shadow_log_only)
 
 
+def _fast_mod(on):
+    global SIM
+    SIM = Sim()
+    mod = load_relay()
+    mod.log = lambda m: SIM.logs.append((SIM.t, m))
+    mod.FAST_RESUME_LOG = on
+    mod.FAST_WATCH.clear()
+    for k in mod.FAST_STATS:
+        mod.FAST_STATS[k] = 0
+    mod.RELAY_MAP[DORIAN] = {"host": HOST, "user": "IY0"}
+    mod.RELAY_MAP[THIRD] = {"host": HOST, "user": "DORIAN_D"}
+    mod.RELAY_HOSTS.clear()          # reset_joiner then only does the leave check
+    return mod
+
+
+def _fast_rec(mod, ip, port, t0, quiet):
+    return {"t0": t0, "host": HOST, "ep": (ip, port), "kind": "resume", "quiet": quiet, "state": "strict",
+            "ctx": "in-game", "hole": 45009, "cur": 45009, "data": t0 - 555, "any": t0 - 9, "cold": False, "events": [], "bad": ""}
+
+
+def sc_fast_resume_log_only(new):
+    """2026-11-20 - fast resume flag (log only). Replays 2026-11-19 23:46:20 (SNAKE strict host): IY0's link quiet 689 s is
+    answered in 0.0 s at a round end and IY0's console leaves the room 8.8 s later. Also a normal return (answered after
+    10 s: no flag), a fast answer the player stays through (follow-up 'stayed'), and a whole session that must route the
+    same with the flag on and off."""
+    mod = _fast_mod(True)
+    t = mod.time.monotonic() - 8.8     # reset_joiner reads the wall clock: the leave comes 8.8 s after the answer
+    mod.age_emit(_fast_rec(mod, DORIAN, 10071, t, 689), t + 0.0, "answered")       # IY0, the 23:46:20 case
+    mod.age_emit(_fast_rec(mod, THIRD, 10071, t + 0.2, 683), t + 15.6, "answered")  # DORIAN_D, normal 15.4 s wait
+    mod.reset_joiner(DORIAN, "GROUP_LEAVE room 107 (IY0)")                          # wall clock: within the watch window
+    t2 = t + 600
+    mod.age_emit(_fast_rec(mod, THIRD, 10073, t2, 900), t2 + 0.1, "answered")      # fast answer, player stays
+    mod.fast_resume_tick(t2 + 0.1 + mod.FAST_WATCH_S + 1)
+    L = [m for _, m in SIM.logs]
+    flags = [m for m in L if m.startswith("FAST RESUME: ")]
+    left = [m for m in L if m.startswith("FAST RESUME follow-up") and "LEFT the room" in m and "IY0" in m]
+    stayed = [m for m in L if m.startswith("FAST RESUME follow-up") and "stayed in the room" in m]
+    normal_flag = [m for m in flags if "683s" in m]
+    off = _fast_mod(False)
+    t = off.time.monotonic() - 8.8
+    off.age_emit(_fast_rec(off, DORIAN, 10071, t, 689), t, "answered")
+    off.reset_joiner(DORIAN, "GROUP_LEAVE room 107 (IY0)")
+    off_lines = [m for _, m in SIM.logs if m.startswith("FAST")]
+    orig = World.__init__
+    def mk(flag):
+        def init(self, *a, **k):
+            orig(self, *a, **k)
+            self.mod.FAST_RESUME_LOG = flag
+            self.mod.FAST_WATCH.clear()
+        return init
+    runs = []
+    for flag in (True, False):
+        World.__init__ = mk(flag)
+        try:
+            runs.append(_fail_world(True))
+        finally:
+            World.__init__ = orig
+    st = lambda L: [(t_, m) for t_, m in _routing_lines(L) if not m.startswith("FAST")]
+    same_run = st(runs[0][1]) == st(runs[1][1]) and runs[0][0].deliveries == runs[1][0].deliveries
+    ok = (len(flags) == 2 and bool(left) and bool(stayed) and not normal_flag and not off_lines and same_run) if new else True
+    return ok, (f"fast flags {len(flags)} (want 2), left line {len(left)}, stayed line {len(stayed)}, normal return flagged "
+                f"{len(normal_flag)}, lines with it off {len(off_lines)}, whole session identical: {'yes' if same_run else 'NO'}"
+                + (f"\n      e.g. {flags[0][:220]}" if flags else "") + (f"\n      e.g. {left[0][:220]}" if left else ""))
+
+
+SCENARIOS.append(sc_fast_resume_log_only)
+
+
+def _upnp_open_mod(on):
+    global SIM
+    SIM = Sim()
+    mod = load_relay()
+    mod.log = lambda m: SIM.logs.append((SIM.t, m))
+    mod.UPNP_OPEN_SHADOW = on
+    for k in mod.UPNP_OPEN_STATS:
+        mod.UPNP_OPEN_STATS[k] = 0
+    mod.HOLD_MODE = "auto"
+    mod.HOLD_NOREPLY_STRICT = True
+    mod.NAT_NAMES[HOST] = "COOLDOR"
+    mod.HOST_HOLD.clear()
+    return mod
+
+
+def sc_upnp_open_shadow_log_only(new):
+    """2026-11-21 - UPnP-open shadow (log only). Replays 01:19:16: COOLDOR (PCSX2 Sockets, UPnP forward confirmed, router
+    probe fresh 4/4) is judged strict when ANDROID-DOR gets no reply for 18 s on hole 45002 (host silent there 144 s,
+    last ping 46 s before). With the flag on: one 'WOULD keep it open' line; a host with no UPnP report gets 'strict
+    stands'; with the flag off no lines; the verdict itself is the same either way; a whole session routes the same."""
+    out = {}
+    for on in (True, False):
+        mod = _upnp_open_mod(on)
+        now = mod.time.monotonic()
+        mod.HOST_DATA[HOST] = {45002: now - 18 - 144, 45004: now}
+        mod.HOST_TRAFFIC[HOST] = {45002: now - 18 - 46, 45004: now}
+        mod.SHADOW_HINT[HOST] = now - 774
+        mod.SHADOW_EV[HOST] = {"fresh": [0, 0, 2], "stale": [0, 1, 5], "would": 6, "links": 6,
+                               "probe": {"fresh_ok": 4, "fresh_miss": 0, "stale_ok": 1, "stale_miss": 1}}
+        mod.hold_noreply_verdict(HOST, 45002, now - 18, now, "ANDROID-DOR 159.26.103.66:10071")
+        state = mod.hold_state(HOST)
+        other = "203.0.113.9"
+        mod.HOST_HOLD[other] = {"state": "unknown"}
+        mod.HOST_DATA[other] = {45002: now - 300, 45004: now}
+        mod.HOST_TRAFFIC[other] = {45002: now - 100, 45004: now}
+        mod.hold_noreply_verdict(other, 45002, now - 18, now, "X 1.2.3.4:10071")
+        out[on] = (state, mod.hold_state(other), [m for _, m in SIM.logs if m.startswith("UPNP_OPEN")])
+    would = [m for m in out[True][2] if "WOULD keep it open" in m and "COOLDOR" in m and "4/4" in m]
+    stands = [m for m in out[True][2] if "strict stands" in m and "203.0.113.9" in m]
+    orig = World.__init__
+    def mk(flag):
+        def init(self, *a, **k):
+            orig(self, *a, **k)
+            self.mod.UPNP_OPEN_SHADOW = flag
+        return init
+    runs = []
+    for flag in (True, False):
+        World.__init__ = mk(flag)
+        try:
+            runs.append(_fail_world(True))
+        finally:
+            World.__init__ = orig
+    st = lambda L: [(t_, m) for t_, m in _routing_lines(L) if not m.startswith("UPNP_OPEN")]
+    same_run = st(runs[0][1]) == st(runs[1][1]) and runs[0][0].deliveries == runs[1][0].deliveries
+    same_verdict = out[True][0] == out[False][0] == "strict" and out[True][1] == out[False][1] == "strict"
+    ok = (len(would) == 1 and len(stands) == 1 and not out[False][2] and same_verdict and same_run) if new else True
+    return ok, (f"would-open line {len(would)} (want 1), strict-stands line {len(stands)} (want 1), lines with it off "
+                f"{len(out[False][2])}, verdicts unchanged: {'yes' if same_verdict else 'NO'}, whole session identical: "
+                f"{'yes' if same_run else 'NO'}" + (f"\n      e.g. {would[0][:230]}" if would else ""))
+
+
+SCENARIOS.append(sc_upnp_open_shadow_log_only)
+
+
+def sc_pause_shadow_log_only(new):
+    """2026-11-21 - pause shadow (log only). Replays 03:20:29: COOLDOR judged strict when ANDROID-DOR's match-start link got
+    nothing back on cold hole 45004 for 4 s; the host's last data on its other holes (45001-45003) was 2 s before the
+    verdict and it then sent nothing anywhere for 7 s (match about to start). With the flag on: one 'WOULD cancel' line
+    for that case, one 'verdict stands' line for a host that kept sending; with it off no lines; the verdict itself is
+    unchanged; a whole session routes the same."""
+    out = {}
+    for on in (True, False):
+        global SIM
+        SIM = Sim()
+        mod = load_relay()
+        mod.log = lambda m: SIM.logs.append((SIM.t, m))
+        mod.PAUSE_SHADOW = on
+        mod.PAUSE_WATCH.clear()
+        for k in mod.PAUSE_STATS:
+            mod.PAUSE_STATS[k] = 0
+        mod.NAT_NAMES[HOST] = "COOLDOR"
+        T = 1000.0
+        # case 1: the 03:20:29 pause - last data elsewhere 2 s before, nothing again until T+5
+        mod.HOST_DATA[HOST] = {45001: T - 2.0, 45002: T - 2.0, 45003: T - 2.1}
+        mod.pause_shadow_note(HOST, 45004, T, "nothing back on cold hole 45004")
+        for i in range(1, 10):
+            if i >= 5:
+                for p_ in (45001, 45002, 45003):
+                    mod.HOST_DATA[HOST][p_] = T + i
+            mod.pause_shadow_tick(T + i)
+        # case 2: a host that keeps sending game data every 0.2 s on another hole
+        other = "203.0.113.9"
+        mod.HOST_DATA[other] = {45001: T + 20 - 0.2}
+        mod.pause_shadow_note(other, 45004, T + 20, "nothing back on cold hole 45004")
+        for i in range(1, 10):
+            mod.HOST_DATA[other][45001] = T + 20 + i - 0.2
+            mod.pause_shadow_tick(T + 20 + i)
+        out[on] = [m for _, m in SIM.logs if m.startswith("PAUSE")]
+    cancel = [m for m in out[True] if "WOULD cancel" in m and "COOLDOR" in m]
+    stands = [m for m in out[True] if "verdict stands" in m and "203.0.113.9" in m]
+    errs = [m for m in out[True] if "error" in m]
+    orig = World.__init__
+    def mk(flag):
+        def init(self, *a, **k):
+            orig(self, *a, **k)
+            self.mod.PAUSE_SHADOW = flag
+        return init
+    runs = []
+    for flag in (True, False):
+        World.__init__ = mk(flag)
+        try:
+            runs.append(_fail_world(True))
+        finally:
+            World.__init__ = orig
+    st = lambda L: [(t_, m) for t_, m in _routing_lines(L) if not m.startswith("PAUSE")]
+    same_run = st(runs[0][1]) == st(runs[1][1]) and runs[0][0].deliveries == runs[1][0].deliveries
+    pause_in_run = [m for _, m in runs[0][1] if m.startswith("PAUSE")] if isinstance(runs[0][1][0], tuple) else []
+    ok = (len(cancel) == 1 and len(stands) == 1 and not errs and not out[False] and same_run) if new else True
+    return ok, (f"would-cancel line {len(cancel)} (want 1), verdict-stands line {len(stands)} (want 1), errors {len(errs)}, "
+                f"lines with it off {len(out[False])}, whole session identical: {'yes' if same_run else 'NO'} "
+                f"(PAUSE lines in that session: {len(pause_in_run)})" + (f"\n      e.g. {cancel[0][:240]}" if cancel else ""))
+
+
+SCENARIOS.append(sc_pause_shadow_log_only)
+
+
+def sc_pause_aware_verdict(new):
+    """2026-11-21 - pause-aware strict verdict (SCCT_RELAY_PAUSE_AWARE). Drives the real cold-hole detector (hold_detect):
+    (A) COOLDOR 04:16:27 - a join link 4.1 s unanswered on cold hole 45009, the host's last data elsewhere 1.8 s before,
+        then silent everywhere: with the switch on the verdict is cancelled and the host stays untested; off: strict.
+    (B) a real strict host that keeps sending to its other players every 0.2 s: strict with the switch on too, under 1 s
+        later than with it off.
+    (C) the cap: after 2 cancels the 3rd paused test gives strict at once.
+    (D) whole-session replays (no-reply/strict world) with the switch on and off: same verdicts and same deliveries."""
+    def mk(on):
+        global SIM
+        SIM = Sim()
+        mod = load_relay()
+        mod.log = lambda m: SIM.logs.append((SIM.t, m))
+        mod.HOLD_MODE = "auto"
+        mod.PAUSE_AWARE = on
+        mod.HOST_HOLD.clear()
+        mod.HOST_DATA.clear()
+        mod.HOST_TRAFFIC.clear()
+        mod.RELAY_MAP.clear()
+        return mod
+    ep = ("203.0.113.50", 10072)
+    def paused_case(mod, host, T):
+        st = mod.HOST_HOLD.setdefault(host, {"state": "unknown"})
+        st.setdefault("probe", {})[45009] = [T - 4.1, 11, ep]
+        mod.HOST_DATA[host] = {45001: T - 1.8, 45002: T - 1.8, 45003: T - 1.9}
+        out = []
+        for dt in (0.0, 1.0, 2.0, 3.2, 4.0):
+            mod.hold_detect(T + dt)
+            out.append(mod.hold_state(host))
+        return out
+    res = {}
+    for on in (True, False):
+        mod = mk(on)
+        a = paused_case(mod, HOST, 1000.0)
+        # B: real strict host
+        host_b = "198.51.100.7"
+        st = mod.HOST_HOLD.setdefault(host_b, {"state": "unknown"})
+        T = 2000.0
+        st["probe"] = {45009: [T - 4.1, 11, ep]}
+        mod.HOST_DATA[host_b] = {45001: T - 0.2}
+        t_strict = None
+        for k in range(0, 40):
+            t = T + k * 0.1
+            mod.HOST_DATA[host_b][45001] = t - 0.05
+            mod.hold_detect(t)
+            if mod.hold_state(host_b) == "strict":
+                t_strict = t - T
+                break
+        # C: cap
+        host_c = "198.51.100.8"
+        caps = []
+        for i in range(3):
+            caps.append(paused_case(mod, host_c, 3000.0 + 100 * i)[-1])
+        res[on] = (a, t_strict, caps, [m for _, m in SIM.logs if m.startswith("HOLD") or m.startswith("PAUSE")])
+    a_on, a_off = res[True][0], res[False][0]
+    okA = a_on[-1] == "unknown" and a_off[0] == "strict"
+    okB = res[True][1] is not None and res[False][1] is not None and res[True][1] - res[False][1] < 1.0
+    okC = res[True][2] == ["unknown", "unknown", "strict"]
+    errs = [m for m in res[True][3] if "error" in m]
+    cancel = [m for m in res[True][3] if "verdict cancelled" in m]
+    orig = World.__init__
+    def mkw(flag):
+        def init(self, *a, **k):
+            orig(self, *a, **k)
+            self.mod.PAUSE_AWARE = flag
+        return init
+    runs = []
+    for flag in (True, False):
+        World.__init__ = mkw(flag)
+        try:
+            runs.append(_fail_world(True))
+        finally:
+            World.__init__ = orig
+    verd = lambda L: [m.split(":")[0] + (" strict" if "is strict" in m else "") for _, m in L if "is strict" in m]
+    lines = lambda L: [m for _, m in L if " is strict" in m or " is open" in m]
+    same = runs[0][0].deliveries == runs[1][0].deliveries and len(lines(runs[0][1])) == len(lines(runs[1][1]))
+    ok = (okA and okB and okC and same and not errs) if new else True
+    return ok, (f"A paused: on {a_on} / off first={a_off[0]} ({'ok' if okA else 'BAD'}); B real strict: verdict after "
+                f"{res[True][1]}s on vs {res[False][1]}s off ({'ok' if okB else 'BAD'}); C cap: {res[True][2]} "
+                f"({'ok' if okC else 'BAD'}); D whole session same deliveries/verdicts: {'yes' if same else 'NO'}; errors {len(errs)}"
+                + (f"\n      e.g. {cancel[0][:230]}" if cancel else ""))
+
+
+SCENARIOS.append(sc_pause_aware_verdict)
+
+
+def sc_pause_group_count(new):
+    """2026-11-21 05:21 - DORIAN_D and ANDROID-DOR joined COOLDOR's room 0.02 s apart; their second links (45009, 45010)
+    opened 0.1 s apart and both ran into the same ~5 s host pause, so both strict verdicts were cancelled and the
+    per-host limit of 2 was used up by one pause. Now: (1) that replay counts 1 cancel, not 2; (2) a later, separate
+    pause is cancel 2; (3) a third separate pause gives strict at once (cap still works); (4) a real strict host that
+    keeps sending to others is strict even while a pause-cancel window from another link is fresh? - it is: the
+    window only lets the CHECK start, the check itself still sees the host sending and confirms strict."""
+    global SIM
+    SIM = Sim()
+    mod = load_relay()
+    mod.log = lambda m: SIM.logs.append((SIM.t, m))
+    mod.HOLD_MODE = "auto"
+    mod.PAUSE_AWARE = True
+    for d in (mod.HOST_HOLD, mod.HOST_DATA, mod.HOST_TRAFFIC, mod.RELAY_MAP):
+        d.clear()
+    h = HOST
+    def pause(T, ports):
+        st = mod.HOST_HOLD.setdefault(h, {"state": "unknown"})
+        pr = st.setdefault("probe", {})
+        for k, port in enumerate(ports):
+            pr[port] = [T - 4.1 + 0.1 * k, 11, ("203.0.113.%d" % (50 + k), 10072)]
+        mod.HOST_DATA[h] = {45001: T - 1.5, 45002: T - 1.5}
+        for dt in (0.0, 0.1, 1.0, 2.0, 3.1, 3.2, 4.0):
+            mod.hold_detect(T + dt)
+        return mod.hold_state(h), mod.HOST_HOLD[h].get("pause_cancels", 0)
+    r1 = pause(1000.0, [45009, 45010])
+    r2 = pause(1100.0, [45011])
+    r3 = pause(1200.0, [45012])
+    # (4) real strict host right after its own same-pause window: two links, host keeps sending
+    h2 = "198.51.100.9"
+    st = mod.HOST_HOLD.setdefault(h2, {"state": "unknown", "pause_cancels": 2, "pause_last_cancel": 2000.0})
+    st["probe"] = {45009: [2001.0 - 4.1, 11, ("203.0.113.60", 10072)]}
+    mod.HOST_DATA[h2] = {45001: 2001.0}
+    t4 = None
+    for k in range(30):
+        t = 2001.0 + k * 0.1
+        mod.HOST_DATA[h2][45001] = t - 0.05
+        mod.hold_detect(t)
+        if mod.hold_state(h2) == "strict":
+            t4 = t - 2001.0
+            break
+    lines = [m for _, m in SIM.logs if "verdict cancelled" in m]
+    same = [m for m in lines if "same pause" in m]
+    ok1 = r1 == ("unknown", 1) and len(same) == 1
+    ok2 = r2 == ("unknown", 2)
+    ok3 = r3[0] == "strict"
+    ok4 = t4 is not None and t4 < 1.0
+    ok = (ok1 and ok2 and ok3 and ok4) if new else True
+    return ok, (f"05:21 replay (2 links, one pause): state/cancels {r1} want ('unknown', 1) {'ok' if ok1 else 'BAD'}; "
+                f"2nd pause {r2} {'ok' if ok2 else 'BAD'}; 3rd pause -> {r3[0]} {'ok' if ok3 else 'BAD'}; real strict host "
+                f"strict after {t4}s {'ok' if ok4 else 'BAD'}" + (f"\n      e.g. {same[0][:230]}" if same else ""))
+
+
+SCENARIOS.append(sc_pause_group_count)
+
+
 def _verdict_mod(strict):
     global SIM
     SIM = Sim()
@@ -1931,6 +2267,46 @@ def sc_host_nat_lost_log(new):
 
 
 SCENARIOS.append(sc_host_nat_lost_log)
+
+
+def sc_loop_stats_log_only(new):
+    """Loop timing (SCCT_RELAY_LOOP_STATS) is log only: off in code; when on it counts game packets into the right
+    latency buckets, sums housekeeping and pauses (and which pauses had packets waiting), prints one LOOP STATS line per
+    window with traffic, none for an idle window, and resets after each window."""
+    global SIM
+    SIM = Sim()
+    mod = load_relay()
+    mod.log = lambda m: SIM.logs.append((SIM.t, m))
+    forced = os.environ.get("SCCT_RELAY_LOOP_STATS", "0").strip().lower() in ("1", "on", "true", "yes")
+    off_in_code = (mod.LOOP_STATS is False) or forced   # forced on by the caller for a full run
+    if not new:
+        return off_in_code, f"switch off in code: {off_in_code}"
+    mod.LOOP_STATS_S = 300.0
+    st = mod.LoopStats(1000.0)
+    for dt in [0.00005] * 90 + [0.0008] * 8 + [0.006, 0.030]:   # 100 game packets: 90 fast, 8 <1ms, one 6ms, one 30ms
+        st.packet(True, dt)
+    st.packet(False, 0.002)
+    for dt in (0.0002, 0.0004, 0.0031):
+        st.housekeeping(dt)
+    st.pause(0.025, True, True)
+    st.pause(0.026, False, False)
+    st.tick(1100.0)                      # inside the window: no line yet
+    early = len(SIM.logs)
+    st.tick(1300.5)                      # window over: one line, then reset
+    lines = [m for _, m in SIM.logs if m.startswith("LOOP STATS")]
+    ln = lines[0] if lines else ""
+    st.tick(1601.0)                      # idle window: no line
+    lines2 = [m for _, m in SIM.logs if m.startswith("LOOP STATS")]
+    want = ["game pkts 100", "p99 <10ms", "max 30.0ms", ">=5ms 2", "other pkts 1", "housekeeping 3 passes",
+            "max 3.1ms", "pauses 2 total 51ms max 26ms", "with packets waiting 1 (game 1)"]
+    missing = [w for w in want if w not in ln]
+    p50 = st.pct(0.5)
+    ok = off_in_code and early == 0 and len(lines) == 1 and not missing and len(lines2) == 1 and st.game_n == 0
+    return ok, (f"off in code {off_in_code}; lines before window end {early}; lines {len(lines)} then after idle window "
+                f"{len(lines2)}; missing fields {missing or 'none'}\n      {ln[:300]}")
+
+
+SCENARIOS.append(sc_loop_stats_log_only)
 
 
 def main():
