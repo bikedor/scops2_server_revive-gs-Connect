@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.18
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.19
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -614,7 +614,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.18 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.19 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -904,7 +904,7 @@ function Get-ScopsReport {
     $routerName = ""
     if ($script:Brand) { $routerName = "$($script:Brand.Name) $($script:Brand.Model)".Trim() } elseif ($script:RouterInfo) { $routerName = $script:RouterInfo }
     $L = New-Object System.Collections.Generic.List[string]
-    $L.Add("=== SCOPS log (V8.18) ===")
+    $L.Add("=== SCOPS log (V8.19) ===")
     $L.Add("Time:      " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
     $L.Add("Windows:   $os, PowerShell $($PSVersionTable.PSVersion)")
     $L.Add("DNS tool:  $mode, $alive, mode=$($script:DnsMode), tries=$($script:DnsTries)")
@@ -1834,6 +1834,47 @@ function Get-DnsTool([string]$mode) {
     return $null
 }
 
+# V8.19: StreamReader.Peek() returns -1 for good once one read came back short (.NET's _isBlocked flag), so the old
+# "while Peek" loop only ever saw the first chunk of scops-dns.log. On BLACKNIGHT's PC (2026-11-24, no scopsDNS.exe
+# or Python, so scopsDNS.ps1 ran) that chunk was only "This computer's address"; the "no hijack detected" written a
+# moment later was never read, and both tries showed "no answer" although DNS worked. ReadToEnd() reads the file
+# again on every call. A line still being written is kept until its end arrives.
+function Read-DnsNewLines {
+    $out = @()
+    if (-not $script:DnsRead) { return $out }
+    $chunk = $script:DnsRead.ReadToEnd()
+    if (-not $chunk) { return $out }
+    $parts = @(($script:DnsCarry + $chunk) -split "`r?`n")
+    $script:DnsCarry = $parts[$parts.Count - 1]
+    if ($parts.Count -gt 1) { $out = @($parts[0..($parts.Count - 2)]) }
+    $script:DnsLinesSeen += $out.Count
+    return $out
+}
+
+# V8.19: the whole of scops-dns.log, read straight from disk; returns the lines not passed on yet (including a last
+# line without an ending, as the check has finished).
+function Read-DnsFinalLines {
+    $out = @()
+    if (-not $script:DnsLog) { return $out }
+    try {
+        $fs = [System.IO.File]::Open($script:DnsLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs)
+        $all = $sr.ReadToEnd()
+        $sr.Close()
+    } catch {
+        Write-ScopsLog "could not read scops-dns.log again: $($_.Exception.Message)"
+        return $out
+    }
+    $lines = @($all -split "`r?`n")
+    if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq "") {
+        $lines = if ($lines.Count -gt 1) { @($lines[0..($lines.Count - 2)]) } else { @() }
+    }
+    if ($lines.Count -gt $script:DnsLinesSeen) { $out = @($lines[$script:DnsLinesSeen..($lines.Count - 1)]) }
+    $script:DnsLinesSeen = $lines.Count
+    $script:DnsCarry = ""
+    return $out
+}
+
 function Start-ScopsDns {
     $dir = Split-Path -Parent $PSCommandPath
     $tool = Get-DnsTool "check"
@@ -1886,6 +1927,9 @@ function Start-ScopsDns {
     $script:DnsProc = $proc
     $script:DnsLog = $dnsLog
     $script:DnsRead = $null
+    $script:DnsCarry = ""
+    $script:DnsLinesSeen = 0
+    $script:DnsFinalRead = $false
     try {
         $fs = [System.IO.File]::Open($dnsLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $script:DnsRead = New-Object System.IO.StreamReader($fs)
@@ -1909,10 +1953,20 @@ function Start-ScopsDns {
                     $script:DnsLastAlive = $alive
                 }
             }
-            if ($script:DnsRead) {
-                while ($script:DnsRead.Peek() -ge 0) {
-                    $line = $script:DnsRead.ReadLine()
-                    if ($null -eq $line) { break }
+            $newLines = @(Read-DnsNewLines)
+            # V8.19: one second after a finished check, read scops-dns.log once more straight from disk, before the
+            # 2 s "no answer" verdict below, and pass on any line the live reader has not passed on yet.
+            if ($script:DnsMode -eq "check" -and $script:DnsState -eq "busy" -and $script:DnsProc -and $script:DnsProc.HasExited -and -not $script:DnsFinalRead) {
+                if (-not $script:DnsEndedAt) { $script:DnsEndedAt = Get-Date }
+                if (((Get-Date) - $script:DnsEndedAt).TotalSeconds -ge 1) {
+                    $script:DnsFinalRead = $true
+                    $late = @(Read-DnsFinalLines)
+                    if ($late.Count -gt 0) { Write-ScopsLog "DNS check: $($late.Count) line(s) read from scops-dns.log after the check ended" }
+                    $newLines += $late
+                }
+            }
+            if ($newLines.Count -gt 0) {
+                foreach ($line in $newLines) {
                     Write-ScopsLog "dns: $line"
                     if ($line -match "PS2 address seen: (\d{1,3}(?:\.\d{1,3}){3})") {
                         $seen = $Matches[1]
@@ -2096,6 +2150,9 @@ $dnsBtn.Add_Click({
     [void]$proc.Start()
     $script:DnsProc = $proc
     try { if ($script:DnsRead) { $script:DnsRead.Close() } } catch {}
+    $script:DnsLog = $dnsLog
+    $script:DnsCarry = ""
+    $script:DnsLinesSeen = 0
     $fs = [System.IO.File]::Open($dnsLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     $script:DnsRead = New-Object System.IO.StreamReader($fs)
     Write-ScopsLog "local DNS started pid $($proc.Id)"

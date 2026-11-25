@@ -3034,6 +3034,9 @@ def handle_message(
                 # [match id, ?, [player, max index, count, mask, [values]], ...]
                 _m = next((m for m in _matches.values() if str(m["id"]) == _rid), None)
                 if _m is not None:
+                    # SCCT_RANKED_END_CHECK: who sent a report for this match (the host every 30 s, the others once at the end)
+                    _snd = _m.setdefault("senders", {})
+                    _snd[str(clt.username)] = _snd.get(str(clt.username), 0) + 1
                     for _e in _raw_args[2:]:
                         if isinstance(_e, list) and len(_e) >= 5:
                             _nm = str(_e[0])
@@ -3046,6 +3049,31 @@ def handle_message(
                 return _lobby_reply(msg, lobby_subtype, [_rid])
             if lobby_subtype == 45:
                 _m = _matches.pop(_rid, None)
+                if _m is not None and _m["order"] and os.environ.get("SCCT_RANKED_END_CHECK", "0").strip().lower() in ("1", "on", "true", "yes"):
+                    # 2026-11-24 (KNOCKEDRIVER hosting, Mount Hospital, revenge on): at a normal ranked end every console sends
+                    # its final report (msg 30) just before the host's MATCH_FINISH. That time BLACKNIGHT and DORIAN_D sent
+                    # none and never reached the stats screen, and the revenge round never loaded. Log only: name who is missing.
+                    try:
+                        _exp = [str(p) for p in _m.get("players", []) if p]
+                        _got = _m.get("senders", {})
+                        _vals = _m["values"]
+                        _q = [n for n in _exp if isinstance(_vals.get(n), list) and len(_vals[n]) > 2 and str(_vals[n][2]) == "0"]
+                        _miss = [n for n in _exp if n not in _got and n not in _q]
+                        _won = any(isinstance(v, list) and len(v) > 1 and str(v[1]).strip() not in ("", "0") and not str(v[1]).strip().startswith("-")
+                                   for v in _vals.values())
+                        _n_ok = len(_exp) - len(_miss) - len(_q)
+                        _txt = f"final report from {_n_ok} of {len(_exp) - len(_q)} console(s)"
+                        if _q:
+                            _txt += f" (quit mid-match, not counted: {_q})"
+                        if not _miss:
+                            log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} END_CHECK ok: {_txt}", log_fp=log_fp)
+                        elif not _won:
+                            log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} END_CHECK: {_txt}; missing {_miss} - nobody won (host returned to the lobby?), so this is expected", log_fp=log_fp)
+                        else:
+                            log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} END_CHECK MISSING: {_txt}; no final report from {_miss} - "
+                                     f"their console may be stuck before the stats screen, which can block a revenge round (2026-11-24)", log_fp=log_fp)
+                    except Exception as _e:
+                        log_line(f"[{now_ts()}] RANKED_FLOW END_CHECK failed: {_e!r}", log_fp=log_fp)
                 if _m is not None:
                     if _m["order"]:
                         # The game's results parser reads 14+ ints per player (scoGLClient::LobbyRcv_FinalMatchResults reads

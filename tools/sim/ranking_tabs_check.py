@@ -7,20 +7,22 @@ Ranking Neutralisation, Ranking Sabotage again with the older player losing as a
 with overall points only. Modes: off, on (per-mode tabs), full (on + my-stats per tab + floor at 0 per mode/side),
 abort (full + a host-abort match and a match with a leaver), winner (abort + SCCT_RANKED_REQUIRE_WINNER=1),
 plist (full + the player list test flag: every ladder answer shows fake numbers, nothing recorded differently),
-disc (winner + SCCT_RANKED_DISC=1: the quitter in the leaver match gets NB_DISC +1 and result field 18 = 1)."""
+disc (winner + SCCT_RANKED_DISC=1: the quitter in the leaver match gets NB_DISC +1 and result field 18 = 1),
+endcheck (disc + SCCT_RANKED_END_CHECK=1, each console sends its own report, and one more match with a winner
+where two consoles send no final report: the log names them)."""
 import sys, os, io, types, inspect, time, json, pathlib
 root, mode, outp = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path[:0] = [os.path.join(root, "tools"), os.path.join(root, "ubi-gs-new"), os.path.join(root, "pylib")]
 os.environ["SCCT_LADDER_MODULE"] = "1"
 os.environ["SCCT_RANKED_REQUIRE_RANKED"] = "1"
 os.environ["SCCT_RANKED_MODE_BITS"] = "1"
-if mode in ("on", "full", "abort", "winner", "plist", "disc"):
+if mode in ("on", "full", "abort", "winner", "plist", "disc", "endcheck"):
     os.environ["SCCT_RANKED_MODE_TABS"] = "1"
     os.environ["SCCT_RANKED_MODE_SIDE_LEDGER"] = "1"
-if mode in ("full", "abort", "winner", "plist", "disc"):  # 2026-11-23: my-stats per tab + floor at 0 per mode and side
+if mode in ("full", "abort", "winner", "plist", "disc", "endcheck"):  # 2026-11-23: my-stats per tab + floor at 0 per mode and side
     os.environ["SCCT_RANKED_MYSTATS_TABS"] = "1"
     os.environ["SCCT_RANKED_MODE_FLOOR"] = "1"
-if mode in ("winner", "disc"):          # 2026-11-23: a match where nobody won (host back to lobby) is not recorded
+if mode in ("winner", "disc", "endcheck"):  # 2026-11-23: a match where nobody won (host back to lobby) is not recorded
     os.environ["SCCT_RANKED_REQUIRE_WINNER"] = "1"
 st = pathlib.Path(root) / "state"
 st.mkdir(exist_ok=True)
@@ -28,7 +30,7 @@ for f in st.glob("*"):
     f.unlink()
 (st / "ladder_stats.json").write_text(json.dumps({"OLDTIMER": {"GEN_SCORE": 300, "SPY_SCORE": 200, "SEN_SCORE": 100,
                                                                "GEN_GAMES": 6, "GEN_WON": 4, "SPY_GAMES": 3, "SEN_GAMES": 3}}))
-if mode == "disc":                      # 2026-11-24: a player who quits a recorded match gets a disconnection
+if mode in ("disc", "endcheck"):        # 2026-11-24: a player who quits a recorded match gets a disconnection
     os.environ["SCCT_RANKED_DISC"] = "1"
 if mode == "plist":                     # 2026-11-24 player list test: every ladder answer gets fake per-column numbers
     (st / "ladder_diag.flag").write_text("plist")
@@ -72,6 +74,9 @@ class Conn:
 
 
 M._lobby_state.sessions = {("1.1.1.1", 1): {"conn": Conn(), "username": "A"}}
+if mode == "endcheck":                  # 2026-11-25: the four players are in the room, and each console sends its own report
+    os.environ["SCCT_RANKED_END_CHECK"] = "1"
+    M._lobby_state.sessions = {("1.1.1.%d" % i, 1): {"conn": Conn(), "username": n} for i, n in enumerate(["DORIAN_D", "SNAKE", "IY0", "COOLDOR"], 1)}
 out = io.StringIO()
 
 
@@ -89,7 +94,7 @@ def norm(x):
     return str(x)
 
 
-def call(mtype, lst):
+def call(mtype, lst, who=None):
     msg = types.SimpleNamespace(header=types.SimpleNamespace(type=mtype, property=gsm.PROPERTY.GS), dl=types.SimpleNamespace(lst=lst))
     kw = {}
     for n, p in inspect.signature(M.handle_message).parameters.items():
@@ -98,7 +103,10 @@ def call(mtype, lst):
         kw[n] = None
     kw.update(log_fp=out, frame_bytes=b"", proxy_addr=("127.0.0.1", 1), post_ke2_replay_frames=[])
     try:
-        r = M.handle_message(Clt(), msg, **kw)
+        c = Clt()
+        if who:
+            c.username = who
+        r = M.handle_message(c, msg, **kw)
     except Exception as e:
         return ["EXC", repr(e)]
     dl = getattr(r, "dl", None)
@@ -110,12 +118,14 @@ PH = gsm.MESSAGE_TYPE.PROXY_HANDLER
 replies = []
 
 
-def match(rid, results):   # name -> (team '0' spy / '1' merc, result 1 win / -1 loss[, '0' = quit mid-match])
+def match(rid, results, silent=()):   # name -> (team '0' spy / '1' merc, result 1 win / -1 loss[, '0' = quit mid-match])
     replies.append(call(LOBBY, ["17", [rid, "3"]]))
     mid = list(M._lobby_state.matches.values())[-1]["id"]
     for n, t in results.items():
         team, res, present = (t + ("1",))[:3]
-        replies.append(call(LOBBY, ["30", [str(mid), "0", [n, "3", "4", "15", [team, str(res), present, "300"]]]]))
+        if n in silent:                 # this console never sent its final report (endcheck)
+            continue
+        replies.append(call(LOBBY, ["30", [str(mid), "0", [n, "3", "4", "15", [team, str(res), present, "300"]]]], who=n if mode == "endcheck" else None))
     replies.append(call(LOBBY, ["45", [rid]]))
     time.sleep(0.4)
 
@@ -136,11 +146,16 @@ match("100", win_spy)
 replies.append(call(LOBBY, ["31", ["100", "64", bytes([0x0e]) + r.info[1:]]]))       # -> Ranking Sabotage again
 # near-0 case: OLDTIMER has 200 overall Spy points but none in Sabotage, and loses as a Spy
 match("100", {"OLDTIMER": ("0", -1), "DORIAN_D": ("0", -1), "SNAKE": ("1", 1), "IY0": ("1", 1)})
-if mode in ("abort", "winner", "disc"):
+if mode in ("abort", "winner", "disc", "endcheck"):
     # host returned everyone to the lobby: all four sent as lost (2026-11-23 Cinema test)
     match("100", {"DORIAN_D": ("0", -1), "SNAKE": ("0", -1), "IY0": ("1", -1), "COOLDOR": ("1", -1)})
     # one Mercenary quit mid-match: he stays in the list as a loss, the Spies still win (2026-11-23 Station test)
     match("100", {"DORIAN_D": ("0", 1), "SNAKE": ("0", 1), "IY0": ("1", -1), "COOLDOR": ("1", -1, "0")})
+if mode == "endcheck":
+    # 2026-11-24 Mount Hospital: the match had a winner but two consoles sent no final report
+    match("100", win_spy, silent=("SNAKE", "COOLDOR"))
+    # host back to the lobby: only the host reports, everyone lost -> missing reports are expected
+    match("100", {"DORIAN_D": ("0", -1), "SNAKE": ("0", -1), "IY0": ("1", -1), "COOLDOR": ("1", -1)}, silent=("SNAKE", "IY0", "COOLDOR"))
 cols = {"GEN": ["ALIAS", "GLOBAL_RANK", "GEN_LEVEL", "GEN_SCORE", "GEN_GAMES", "GEN_WON", "GEN_WINRATIO", "GEN_TIME", "SPY_TIME", "SEN_TIME"],
         "SPY": ["ALIAS", "QUERY_RANK", "SPY_LEVEL", "SPY_SCORE", "SPY_GAMES", "SPY_WON", "SPY_WINRATIO", "SPY_TIME"],
         "SEN": ["ALIAS", "QUERY_RANK", "SEN_LEVEL", "SEN_SCORE", "SEN_GAMES", "SEN_WON", "SEN_WINRATIO", "SEN_TIME"]}

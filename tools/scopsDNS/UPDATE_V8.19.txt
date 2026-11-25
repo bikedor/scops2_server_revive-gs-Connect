@@ -1,0 +1,7 @@
+SCOPS window V8.19
+
+Fix: the DNS check could show "DNS check gave no answer" (yellow) although DNS worked,
+mostly on PCs without Python (scopsDNS.ps1 runs). The window now reads the whole check result.
+Only SCOPS_UPnP_Check.ps1 changed. SCOPS.exe is the same and opens the new version.
+The title must say SCOPS V8.19.
+Replace the whole folder.
