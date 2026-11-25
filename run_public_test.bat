@@ -175,6 +175,9 @@ rem 2026-11-23 tests: when the host returns everyone to the lobby mid-match, eve
 rem lost and no Game Statistics screen appears. Such a match, where nobody won, is not counted. A player who quits on his own still
 rem counts as a loss for his side, and the others get their win.
 set SCCT_RANKED_REQUIRE_WINNER=1
+rem 2026-11-24 player list test: the game shows the completed games percentage from GEN_GAMES and NB_DISC (Games List, Quick
+rem Search, Player List). A player who quits a counted ranked match gets one disconnection.
+set SCCT_RANKED_DISC=1
 rem Game check at login: only these games may log in (product id prefixes, comma separated). SC3PS2 = Chaos
 rem Theory, every region. Other Ubisoft PS2 games get the normal login failure. To host another game later, add it,
 rem e.g. SC3PS2,PTPS2 for Pandora Tomorrow. SCCT_GAME_CHECK: refuse (default), log (let in, only log), off.

@@ -300,7 +300,10 @@ def render(m, show_scores=True):
             pts = f"{deltas[n]:+d}" if n in deltas else "-"
             row = m.final_rows.get(n)
             tot = row[6] if (m.recorded and row and len(row) > 6) else "-"
-            lines.append(f"  {n:<16}{side:<12}{resw:<8}{_mmss(_int(v[3])):>7}{pts:>8}{tot:>12}")
+            quit_ = "  quit mid-match" if str(v[2]) == "0" else ""
+            if quit_ and row and len(row) > 18 and str(row[18]) == "1":
+                quit_ += " (disconnection counted)"
+            lines.append(f"  {n:<16}{side:<12}{resw:<8}{_mmss(_int(v[3])):>7}{pts:>8}{tot:>12}{quit_}")
     elif m.players:
         lines.append("  Players: " + ", ".join(m.players))
     for f in flags_for(m):

@@ -2011,6 +2011,7 @@ def handle_message(
                         _v["GEN_SCORE"] = _v["SPY_SCORE"] + _v["SEN_SCORE"]
                         for _f in ("GAMES", "WON", "TIME"):
                             _v[f"GEN_{_f}"] = _v[f"SPY_{_f}"] + _v[f"SEN_{_f}"]
+                        _v["NB_DISC"] = _num(_st0.get(f"{_tmode}_NB_DISC", 0))
                         _mv[_n] = _v
                     _db = _mv
                     log_line(f"[{now_ts()}] LADDER_MODULE mode tab {_tab} ({_tmode}): answering from the {_tmode} ledger", log_fp=log_fp)
@@ -2062,8 +2063,24 @@ def handle_message(
                 # Neutralisation 3100/3200 (Spy/Mercenary). Display only: recording still uses the real totals.
                 try:
                     _dflag = _sp.parent / "ladder_diag.flag"
-                    _dmode = _dflag.read_text(encoding="utf-8-sig", errors="ignore").strip().lower() if (_qtype == "2" and _dflag.exists()) else ""
-                    if _dmode == "diag":
+                    _dmode = _dflag.read_text(encoding="utf-8-sig", errors="ignore").strip().lower() if _dflag.exists() else ""
+                    if _dmode not in ("plist",) and _qtype != "2":
+                        _dmode = ""
+                    if _dmode == "plist":
+                        # Player list test (2026-11-24, state/ladder_diag.flag containing "plist"): EVERY ladder answer (all
+                        # query types, all rows) gets one different number per column, so the "(n)" after each name in the
+                        # in-game Player List shows which stat the game prints there. Display only: nothing is recorded.
+                        # Level 7/8/9 (GEN/SPY/SEN), 20 games with 5 disconnections = 75% finished, rank 42/43.
+                        _dv = {"GEN_LEVEL": "7", "SPY_LEVEL": "8", "SEN_LEVEL": "9",
+                               "GEN_SCORE": "4321", "SPY_SCORE": "2100", "SEN_SCORE": "2221",
+                               "GEN_GAMES": "20", "SPY_GAMES": "11", "SEN_GAMES": "14", "NB_DISC": "5",
+                               "GEN_WON": "16", "SPY_WON": "17", "SEN_WON": "18",
+                               "GEN_WINRATIO": "61", "SPY_WINRATIO": "62", "SEN_WINRATIO": "63",
+                               "GEN_TIME": "3600", "SPY_TIME": "3601", "SEN_TIME": "3602",
+                               "GLOBAL_RANK": "42", "QUERY_RANK": "43"}
+                        _rows = [[_dv.get(c, v) for c, v in zip(_cols, r)] for r in _rows]
+                        log_line(f"[{now_ts()}] LADDER_MODULE PLAYER LIST TEST type={_qtype} tab={_tab} cols={_cols} rows={_rows[:4]}", log_fp=log_fp)
+                    elif _dmode == "diag":
                         _dv = {"GEN_SCORE": "333", "SPY_SCORE": "555", "SEN_SCORE": "777"}
                         _rows = [[_dv.get(c, v) for c, v in zip(_cols, r)] for r in _rows]
                         log_line(f"[{now_ts()}] LADDER_MODULE DIAG my-stats values for {_qargs}: {_rows}", log_fp=log_fp)
@@ -3087,6 +3104,7 @@ def handle_message(
                                 pass
                         _req_win = os.environ.get("SCCT_RANKED_REQUIRE_WINNER", "0").strip().lower() in ("1", "on", "true", "yes")
                         _skip_nowin = _nobody_won and _req_win and not _diag
+                        _quit = []
                         for _ix, _n in enumerate(_m["order"]):
                             _arr = [str(x) for x in (_m["values"][_n] if isinstance(_m["values"][_n], list) else [])][:22]
                             _arr += ["0"] * (22 - len(_arr))
@@ -3105,6 +3123,9 @@ def handle_message(
                                 _old = int(float((_sdb.get(_n) or {}).get(f"{_mkey}_{_rk}_SCORE", 0) or 0))
                             _new = max(0, _old + _delta)
                             _plan.append((_n, _arr[0], _res, (_new - _old) if _mode_floor else _delta, _arr[3]))
+                            if _arr[2] == "0":
+                                # 2026-11-23 test: a player who quits mid-match is sent with arr[2] = 0 (every finisher has 1)
+                                _quit.append(_n)
                             if _diag:
                                 if _arr[0] == "0":
                                     _arr[6] = str(600 + _ix); _arr[7] = str(700 + _ix); _arr[8] = "1"
@@ -3137,8 +3158,23 @@ def handle_message(
                                 _plan = []
                             else:
                                 log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} room was Free at match start but scores were sent; recorded as before (SCCT_RANKED_REQUIRE_RANKED=1 would skip it)", log_fp=log_fp)
-                        if len(_plan) >= _min_pl and any(p_[2] for p_ in _plan) and _spath is not None:
-                            def _apply(_plan=_plan, _spath=_spath, _mid=_m["id"], _mkey=_mkey):
+                        # 2026-11-24 player list test: the game shows "% completed games" = (GEN_GAMES - NB_DISC) x 100 / GEN_GAMES
+                        # (from 10 games) in the Games List, Quick Search and Player List, and adds result field 18 to its own
+                        # NB_DISC. SCCT_RANKED_DISC=1: a player who quit a recorded ranked match gets NB_DISC +1 (overall and for
+                        # the mode) and arr[18] = 1. Off: nothing counted, with a log line saying who would be.
+                        _disc_on = os.environ.get("SCCT_RANKED_DISC", "0").strip().lower() in ("1", "on", "true", "yes")
+                        _recording = len(_plan) >= _min_pl and any(p_[2] for p_ in _plan) and _spath is not None
+                        _disc = [n_ for n_ in _quit if any(p_[0] == n_ for p_ in _plan)] if _recording else []
+                        if _disc and not _disc_on:
+                            log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} quit mid-match: {_disc} (SCCT_RANKED_DISC=1 would count a disconnection)", log_fp=log_fp)
+                            _disc = []
+                        if _disc:
+                            for _r in _rows:
+                                if _r[0] in _disc:
+                                    _r[1][18] = "1"
+                            log_line(f"[{now_ts()}] RANKED_FLOW match {_m['id']} disconnection counted for {_disc} (quit mid-match)", log_fp=log_fp)
+                        if _recording:
+                            def _apply(_plan=_plan, _spath=_spath, _mid=_m["id"], _mkey=_mkey, _disc=list(_disc)):
                                 try:
                                     _d = _json.loads(_spath.read_text(encoding="utf-8-sig")) if _spath.exists() else {}
                                     for _n, _team, _res, _delta, _tm in _plan:
@@ -3172,6 +3208,11 @@ def handle_message(
                                             _st[_sd + "_GAMES"] = int(_st.get(_sd + "_GAMES", 0) or 0) + 1
                                             _st[_sd + "_WON"] = int(_st.get(_sd + "_WON", 0) or 0) + (1 if _res > 0 else 0)
                                             _st[_sd + "_TIME"] = int(_st.get(_sd + "_TIME", 0) or 0) + _t
+                                    for _n in _disc:   # SCCT_RANKED_DISC=1: overall and per-mode disconnections
+                                        _st = _d.setdefault(_n, {})
+                                        _st["NB_DISC"] = int(_st.get("NB_DISC", 0) or 0) + 1
+                                        if _mkey != "UNK":
+                                            _st[_mkey + "_NB_DISC"] = int(_st.get(_mkey + "_NB_DISC", 0) or 0) + 1
                                     for _st in _d.values():  # overall = spy + mercenary totals
                                         _st["GEN_SCORE"] = int(_st.get("SPY_SCORE", 0) or 0) + int(_st.get("SEN_SCORE", 0) or 0)
                                     _spath.write_text(_json.dumps(_d, indent=1), encoding="utf-8")

@@ -121,6 +121,16 @@ Optional: a host with verified open ports in `SCCT_DIRECT_HOSTS` (in `run_public
 
 Loop timing: `SCCT_RELAY_LOOP_STATS=1` (in `run_public_test.bat`) is log only. Every 5 minutes with traffic, one `LOOP STATS` line in `logs/udp_45000_reply.log`: how long relayed game packets spent inside the server (avg, p99, max, count over 5 ms), housekeeping time per loop pass, and the in-loop pauses between multi-packet NAT replies (count, total, and how many had packets - game packets - queued behind them). Answers whether the relay itself adds lag before anything is changed.
 
+## Completed games and disconnections (2026-11-24)
+Player list test result: the Games List shows `Level: 7, 75% completed games` for the host, Quick Search `Joinable, 75% completed games`, the Player List `NAME (2221, 75%)` (that player's side score, then the percentage), and the Ranking screens rank 42, level 7, points 4321. The game computes the percentage itself: (GEN_GAMES - NB_DISC) x 100 / GEN_GAMES, shown only from 10 games. The original server counted disconnections (NB_DISC); ours always answered 0.
+- `SCCT_RANKED_DISC=1` (off in code, on in `run_public_test.bat`): a player who quits a counted ranked match (the consoles send him with field 2 = 0) gets `NB_DISC` +1 overall and `<MODE>_NB_DISC` +1, and field 18 = 1 in his results row (the game adds field 18 to its own disconnection count). A match that is not counted (host abort, too short, Free) counts nothing. Off: nothing counted, log line `quit mid-match: [...] (SCCT_RANKED_DISC=1 would count a disconnection)`.
+- The per-mode Ranking answers carry that mode's disconnections, like their games.
+- The ranked report marks such a player `quit mid-match (disconnection counted)`.
+- Simulator `ranking_tabs_check.py disc`: only the quitter gets NB_DISC 1 (overall and Sabotage), field 18 = 1 in his row only, every other number identical to `winner`; `full` unchanged.
+
+## Player list test (one-off, 2026-11-24)
+The in-game Player List shows `NAME (0)` for everyone. The decompiled online program keeps each player's level and a "finished games" percentage ((GEN_GAMES - NB_DISC) x 100 / GEN_GAMES, only from 10 games) side by side, so the number could be either. `Player list test ON.bat` writes `state/ladder_diag.flag` = `plist`: every ladder answer (all query types and rows) then gets one different number per column: level 7 (Spy 8, Mercenary 9), 20 games with 5 disconnections (75% finished), score 4321 (Spy 2100, Mercenary 2221), won 16/17/18, win ratio 61/62/63, rank 42/43. Log in after switching it on, open the Player List and read the number: 7/8/9 = level, 75 = finished games, 42/43 = rank, still 0 = not from the ladder. Display only: nothing is recorded. `Player list test OFF.bat` removes the flag (same file as the tab test). Lines: `LADDER_MODULE PLAYER LIST TEST` in the router log.
+
 ## Tab test (one-off)
 `Tab test ON.bat` writes `state/ladder_diag.flag` = `tabs`: each Ranking tab's "my stats" answer gets its own number (Spy/Merc: Overall 300/400, Extraction 1100/1200, Sabotage 2100/2200, Neutralisation 3100/3200), so the Old Total on the Game Statistics screen after one ranked match shows which tab and side the game reads. Display only; points are recorded for real. Log in after switching it on. `Tab test OFF.bat` removes the flag. Lines: `LADDER_MODULE TAB TEST` in the router log.
 
