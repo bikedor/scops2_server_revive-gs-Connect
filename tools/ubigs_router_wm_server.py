@@ -3021,11 +3021,12 @@ def handle_message(
                             _matches[_rid]["ranked_at_start"] = _rk0
                             _matches[_rid]["mode_at_start"] = _md0
                             _matches[_rid]["kind_text"] = room_flags_text(_inf)
+                            _matches[_rid]["host"] = str(getattr(_rm, "master", "") or "")
                 except Exception as _e:
                     log_line(f"[{now_ts()}] RANKED_FLOW MODE_INFO failed: {_e!r}", log_fp=log_fp)
                 try:   # Game Type and mode this match starts with (log only)
                     _created = _lobby_state.__dict__.setdefault("room_kind", {}).get(str(_rid) + ":created", "not seen (room made before this server start)")
-                    log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_mid} starts: {_matches[_rid].get('kind_text', 'unknown')}; room created as {_created}", log_fp=log_fp)
+                    log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_mid} starts: {_matches[_rid].get('kind_text', 'unknown')}; room created as {_created}; host={_matches[_rid].get('host', 'unknown')!r}", log_fp=log_fp)
                 except Exception as _e:
                     log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                 _push_room(_rid, 62, [str(_rid), str(_mid)])
@@ -3142,15 +3143,19 @@ def handle_message(
                             if _skip_nowin:
                                 _delta = 0
                             _rk = "SPY" if _arr[0] == "0" else "SEN"
-                            # the client's Old Total comes from the role column (SPY_/SEN_), so the floor is applied on that
-                            _old = int(float((_sdb.get(_n) or {}).get(_rk + "_SCORE", 0) or 0))
+                            # the client's Old Total comes from the role column (SPY_/SEN_), so the SCREEN reads that
+                            _disp_old = int(float((_sdb.get(_n) or {}).get(_rk + "_SCORE", 0) or 0))
                             if _mode_floor:
                                 # 2026-11-23 tab test: the Game Statistics screen reads the played mode's tab on the player's
-                                # side, so the floor is applied on that mode-and-side total (<MODE>_SPY_/_SEN_SCORE) and the
-                                # change actually applied is what every total gets (a loss at 0 in this mode shows 0 -> 0).
-                                _old = int(float((_sdb.get(_n) or {}).get(f"{_mkey}_{_rk}_SCORE", 0) or 0))
-                            _new = max(0, _old + _delta)
-                            _plan.append((_n, _arr[0], _res, (_new - _old) if _mode_floor else _delta, _arr[3]))
+                                # side, so the SCREEN'S floor is on that mode-and-side total (<MODE>_SPY_/_SEN_SCORE).
+                                # 2026-11-25 (BLACKNIGHT and TALLY_WHACKER, Mount Hospital): this floor is for the screen
+                                # only. A loss at 0 in a mode+side a player has never lost before must still cost them
+                                # their real points everywhere else (GEN/overall role/mode-only); each of those ledgers
+                                # is floored at 0 on its OWN value in _apply() below, not at this one tab's value, so an
+                                # established player's real loss is no longer swallowed by a brand-new tab sitting at 0.
+                                _disp_old = int(float((_sdb.get(_n) or {}).get(f"{_mkey}_{_rk}_SCORE", 0) or 0))
+                            _disp_new = max(0, _disp_old + _delta)
+                            _plan.append((_n, _arr[0], _res, _delta, _arr[3]))
                             if _arr[2] == "0":
                                 # 2026-11-23 test: a player who quits mid-match is sent with arr[2] = 0 (every finisher has 1)
                                 _quit.append(_n)
@@ -3161,7 +3166,7 @@ def handle_message(
                                     _arr[8] = "0"; _arr[12] = str(1200 + _ix); _arr[13] = str(1300 + _ix)
                             else:
                                 # screen mapping found in round 67: with arr[8]!=0 the "Game Results" column shows arr[7]
-                                _arr[7] = str(_new - _old); _arr[6] = str(_new); _arr[8] = "1"
+                                _arr[7] = str(_disp_new - _disp_old); _arr[6] = str(_disp_new); _arr[8] = "1"
                             _rows.append([_n, _arr])
                         _min_pl = int(os.environ.get("SCCT_RANKED_MIN_PLAYERS", "4"))
                         # Round 79: a match that ends within seconds (everyone backed out to the lobby) is not a real match.
@@ -3272,7 +3277,7 @@ def handle_message(
                                      f"{_lobby_state.__dict__.get('room_kind', {}).get(str(_rid) + ':created', 'unknown')})")
                         else:
                             _what = "no scores, nothing to record; normal for a Free room"
-                        log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_m['id']} ended: {_kt} - {_what}", log_fp=log_fp)
+                        log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_m['id']} ended: {_kt} - {_what}; host={_m.get('host', 'unknown')!r}", log_fp=log_fp)
                     except Exception as _e:
                         log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                     _push_room(_rid, 71, _final)
