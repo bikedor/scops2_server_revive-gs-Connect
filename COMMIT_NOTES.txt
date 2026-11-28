@@ -16,5 +16,5 @@ What changed
 - run_public_test.bat (put your public IP in it), run_nat_even.bat, run_nat2_test.bat.
 - README.md: port forwarding section, internet test results, Friend Slots 1/2 results, requirements.
 
-Do NOT commit: state/users.json (plaintext passwords), state/shared_router_rsa.json, tools/certs/*.key, venv/, logs/,
+Do NOT commit: state/users.json (account passwords, hashed since 2026-11-25), state/shared_router_rsa.json, tools/certs/*.key, venv/, logs/,
 dnasrep_test/ (binary of unknown licence + private keys), and the empty local README.md on the PC.

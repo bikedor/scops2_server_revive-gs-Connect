@@ -121,6 +121,9 @@ rem Failure steps (log only): 'NAT step' lines when a console socket stops at PO
 rem 'FAIL why' on every no-reply move (when the host last used the dead hole, which holes it was answering, the router
 rem probe), avoided holes on AGE lines, and the evidence behind 'looks address-restricted'. 0 = off.
 set SCCT_RELAY_FAIL_LOG=1
+rem Slow join lines (2026-11-28, log only): warn when a new relay link has no host packet after 50 s.
+rem The game gives up on a join at 60 s (InitialConnectTimeout in its settings). 0 = off.
+set SCCT_RELAY_SLOW_JOIN_LOG=1
 rem Stricter 'open' verdict. OFF by default (0 = exactly as before). 1 = an answer in the host's first burst after a
 rem map load never counts as proof of open (whichever came first), and 2 clean answers are needed before a host is
 rem called open. It can only keep a host unknown/strict longer; strict detection, holds and the spare are unchanged.
@@ -186,4 +189,7 @@ rem Theory, every region. Other Ubisoft PS2 games get the normal login failure. 
 rem e.g. SC3PS2,PTPS2 for Pandora Tomorrow. SCCT_GAME_CHECK: refuse (default), log (let in, only log), off.
 set SCCT_ALLOWED_GAMES=SC3PS2
 set SCCT_GAME_CHECK=refuse
+rem Kick reply (2026-11-28): answer PLAYER_KICK (lobby message 10) with the typed reply the game's kick parser
+rem reads (room id + name) instead of the generic empty reply. 0 = old reply.
+set SCCT_KICK_REPLY=1
 call "%~dp0run_nat_even.bat"

@@ -1,0 +1,12 @@
+SCOPS window V8.20
+
+Minimize to tray: minimizing the window now hides it behind a tray icon instead of
+just shrinking to the taskbar, so an accidental click while fullscreen in the game
+is less likely to hit Close and drop your forwards.
+Right-click the tray icon for Open SCOPS / Close (Close behaves exactly like the
+window's own Close button, same forwards-held warning), or double-click the icon
+to bring the window back. If forwards are held when you minimize, a one-time
+balloon tip reminds you they are still open.
+Only SCOPS_UPnP_Check.ps1 changed. SCOPS.exe is the same and opens the new version.
+The title must say SCOPS V8.20.
+Replace the whole folder.

@@ -2309,6 +2309,45 @@ def sc_loop_stats_log_only(new):
 SCENARIOS.append(sc_loop_stats_log_only)
 
 
+def sc_slow_join_log(new):
+    """Slow join lines (SCCT_RELAY_SLOW_JOIN_LOG, 2026-11-28) are log only: 'old' = switch off, 'new' = on. A first join
+    the host never answers gets one SLOW JOIN line at 50 s (the game gives up at 60 s); one answered at ~62 s gets the
+    note on its AGE line; a link coming back after a pause (an existing connection) gets neither; routing is the same."""
+    def run(slow, late_at=None, resume=False):
+        holes = set(range(45001, 45013))
+        w = World(True, block_out=holes if not resume else ())
+        w.mod.SLOW_JOIN_LOG = slow
+        setup_room(w)                                   # join at 30 s: probe 10072, game link 10071
+        if late_at is not None:
+            SIM.at(BASE + late_at, w.block_out.clear)   # the host's replies start getting through
+        if resume:                                      # answered join, then the link pauses and comes back unanswered
+            w.sim.run_until(BASE + 62, w.mod)
+            w.block_out.update(holes)
+            w.send(10071, 100, 175)
+        else:
+            w.send(10071, 60, 115)
+        w.sim.run_until(BASE + 180, w.mod)
+        slow_lines = [m for _, m in SIM.logs if m.startswith("SLOW JOIN")]
+        notes = [m for _, m in SIM.logs if m.startswith("AGE") and "SLOW JOIN" in m]
+        holes_used = sorted({w.hole_of(p) for p in (10071, 10072)}, key=str)
+        return slow_lines, notes, holes_used, w.got.get(10071, 0)
+    never_off, never_on = run(False), run(True)
+    late_off, late_on = run(False, late_at=92.5), run(True, late_at=92.5)
+    res_on = run(True, resume=True)
+    same = never_off[2:] == never_on[2:] and late_off[2:] == late_on[2:]
+    if not new:
+        ok = not (never_off[0] or never_off[1] or late_off[0] or late_off[1])
+        return ok, f"switch off: SLOW JOIN lines {len(never_off[0]) + len(late_off[0])}, AGE notes {len(never_off[1]) + len(late_off[1])}"
+    ok = (len(never_on[0]) == 1 and not never_on[1] and len(late_on[0]) == 1 and len(late_on[1]) == 1
+          and late_on[3] > 0 and not res_on[0] and not res_on[1] and same)
+    return ok, (f"never answered: {len(never_on[0])} SLOW JOIN line; answered at ~62 s: {len(late_on[0])} line + "
+                f"{len(late_on[1])} AGE note; paused link: {len(res_on[0])} lines; routing same on/off: {same}"
+                + (f" | {never_on[0][0][:150]}" if never_on[0] else ""))
+
+
+SCENARIOS.append(sc_slow_join_log)
+
+
 def main():
     allok = True
     for sc in SCENARIOS:

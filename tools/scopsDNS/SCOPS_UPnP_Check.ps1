@@ -1,4 +1,4 @@
-# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.19
+# SCOPS_UPnP_Check.ps1 - Splinter Cell Chaos Theory (PS2 / PCSX2) host helper with a window. V8.20
 # Asks for the PS2 address, checks whether the router on this network supports UPnP, and if it does,
 # opens the host ports (UDP 3658 and 10070-10080) to that address while the window stays open.
 # After each add it reads the mapping back. Green (and the open hint to the SCOPS server) only when
@@ -614,7 +614,7 @@ function Invoke-Check([string]$ps2) {
 
 # ---------------------------------------------------------------- the window
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SCOPS V8.19 - Splinter Cell Chaos Theory"
+$form.Text = "SCOPS V8.20 - Splinter Cell Chaos Theory"
 $form.ClientSize = New-Object System.Drawing.Size(560, 640)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -904,7 +904,7 @@ function Get-ScopsReport {
     $routerName = ""
     if ($script:Brand) { $routerName = "$($script:Brand.Name) $($script:Brand.Model)".Trim() } elseif ($script:RouterInfo) { $routerName = $script:RouterInfo }
     $L = New-Object System.Collections.Generic.List[string]
-    $L.Add("=== SCOPS log (V8.19) ===")
+    $L.Add("=== SCOPS log (V8.20) ===")
     $L.Add("Time:      " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
     $L.Add("Windows:   $os, PowerShell $($PSVersionTable.PSVersion)")
     $L.Add("DNS tool:  $mode, $alive, mode=$($script:DnsMode), tries=$($script:DnsTries)")
@@ -1700,6 +1700,7 @@ function Stop-ScopsDns {
 }
 
 $form.Add_FormClosing({
+    try { if ($script:Tray) { $script:Tray.Visible = $false } } catch {}
     if (-not $script:CloseOk -and @($script:Mapped).Count -gt 0 -and
         $_.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) {
         $a = [System.Windows.Forms.MessageBox]::Show($form,
@@ -1717,6 +1718,43 @@ $form.Add_FormClosing({
         Remove-Ours
     }
     Stop-ScopsDns
+})
+
+# ---- Minimize to tray (V8.20): minimizing hides the window behind a tray icon instead of just shrinking it to the
+# taskbar, so a host who is fullscreen in the game and clicks the wrong thing is less likely to hit Close by mistake
+# and drop their forwards. The tray icon's own Close does exactly what the window's Close button does (same
+# forwards-held warning). Double-click the icon, or its "Open SCOPS" item, brings the window back.
+$script:Tray = New-Object System.Windows.Forms.NotifyIcon
+$script:Tray.Icon = [System.Drawing.SystemIcons]::Application
+$script:Tray.Text = "SCOPS - Splinter Cell Chaos Theory"
+$script:Tray.Visible = $false
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+[void]$trayMenu.Items.Add("Open SCOPS")
+[void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$trayMenu.Items.Add("Close")
+$script:Tray.ContextMenuStrip = $trayMenu
+
+function Restore-FromTray {
+    $script:Tray.Visible = $false
+    $form.Show()
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+}
+$trayMenu.Items[0].Add_Click({ Restore-FromTray })
+$trayMenu.Items[2].Add_Click({ $form.Close() })
+$script:Tray.Add_DoubleClick({ Restore-FromTray })
+
+$form.Add_Resize({
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        $form.Hide()
+        $script:Tray.Visible = $true
+        if (@($script:Mapped).Count -gt 0) {
+            try {
+                $script:Tray.ShowBalloonTip(3000, "SCOPS", "Still hosting - the forwards stay open. Double-click this icon to reopen the window.",
+                    [System.Windows.Forms.ToolTipIcon]::Info)
+            } catch {}
+        }
+    }
 })
 
 $script:DnsProc = $null
@@ -2158,6 +2196,10 @@ $dnsBtn.Add_Click({
     Write-ScopsLog "local DNS started pid $($proc.Id)"
 })
 try { Start-ScopsDns } catch { Write-ScopsLog "Start-ScopsDns failed: $($_.Exception.Message)" }
-[void]$form.ShowDialog()
+# V8.20: Application.Run, not ShowDialog. ShowDialog() is modal and returns (ending the whole script) the instant
+# the form becomes invisible for ANY reason, Hide() included - so minimizing to tray (which Hides the form) used to
+# silently end the app without its own cleanup (forwards not removed the normal way, DNS helper not stopped).
+# Application.Run keeps the message loop alive while the form is merely hidden, and only ends when it truly closes.
+[System.Windows.Forms.Application]::Run($form)
 Write-ScopsLog "window closed"
 try { $script:OneWindow.ReleaseMutex() } catch {}

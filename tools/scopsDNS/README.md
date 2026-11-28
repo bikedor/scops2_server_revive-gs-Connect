@@ -1,4 +1,4 @@
-# scopsDNS 2.2 / SCOPS window V8.19
+# scopsDNS 2.2 / SCOPS window V8.20
 
 ## Quick start
 1. Unzip this folder anywhere (Desktop is fine) and double-click **SCOPS.exe**.
@@ -22,6 +22,9 @@ SCOPS server relay gets players to you; returns after a map change may just take
 
 Best if you can: forward UDP 3658 and 10070-10080 to the PS2 address by hand (press **Open my router**).
 DMZ only as a last resort: use it for a PS2 console, never a PC (it opens every port), and turn it off after playing.
+
+## What changed in V8.20
+- **Minimize to tray.** Minimizing the window now hides it behind a tray icon instead of just dropping to the taskbar, so an accidental click while fullscreen in the game is less likely to hit **Close** and drop your forwards. Right-click the tray icon for **Open SCOPS** / **Close** (Close works exactly like the window's own Close, same warning if forwards are held), or double-click it to bring the window back. If forwards are held when you minimize, a one-time balloon tip reminds you they are still open.
 
 ## What changed in V8.19
 - **DNS check no longer says "no answer" when DNS works.** The window read only the first part of the check's output, so on PCs without scopsDNS.exe or Python (where `scopsDNS.ps1` runs) the result line was often never seen and the check turned yellow. It now reads everything, and reads `scops-dns.log` once more before giving up. The same fix lets the Log show every console lookup while local DNS runs.

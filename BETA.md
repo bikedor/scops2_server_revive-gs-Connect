@@ -171,6 +171,47 @@ Tally_Whacker had 2 matches recorded as mode "UNK" instead of Neutralisation. Tr
 - Fix (log only, no behaviour change): both `ROOM_KIND ... starts` and `ROOM_KIND ... ended` lines now end with `host='NAME'` - the room's `.master` field, already used elsewhere in the file for host checks. Next time a match comes back UNK, the log says who was hosting.
 Checked with `tools/sim/room_kind_check.py` (same fake-room harness used for the mode-floor fix): all existing checks still pass with the new field added (the harness's fake rooms have no `.master`, so `host=''` there - confirms the lookup never raises even when host info isn't available).
 
+## ROOM_KIND ended line now shows match duration (2026-11-25)
+`SCCT_RANKED_END_CHECK` already names which console sent no final report; it didn't say how long the match had been running when it ended, which matters for telling "crashed right at the start" apart from "froze near the end" (relevant to the 2026-11-24 KNOCKEDRIVER/Mount Hospital hang).
+- Fix (log only, no behaviour change): the match record now stores its start time (`t0`), and the `ROOM_KIND ... ended` line ends with `duration=Ns`. `duration=unknown` only if `t0` is somehow missing (can't happen for a match started after this change).
+Checked with `tools/sim/room_kind_check.py`, run three times: all existing checks pass each run, and the new `duration=0s` field prints on the ended line (0s because the simulator's fake match runs instantly; a real match will show real elapsed seconds).
+
+## SCOPS window V8.20: minimize to tray (2026-11-26)
+A host who is fullscreen in the game and accidentally clicks Close (or the taskbar's own Close) drops their UPnP forwards; the close-warning dialog already catches that, but it's one more click that can go wrong mid-game. V8.19's "Grok" review flagged this as the one remaining loose end.
+- Minimizing the window now hides it behind a system tray icon instead of just shrinking to the taskbar. The tray icon's right-click menu has "Open SCOPS" and "Close" (Close goes through the window's own `Close()`, so the same forwards-held warning still applies); double-clicking the icon reopens the window. If forwards are currently held, minimizing shows a one-time balloon tip reminding the host the forwards are still open.
+- No change to any check, forward, or DNS behaviour - purely a window-visibility feature. `SCOPS_UPnP_Check.ps1` only; `SCOPS.exe` unchanged (it starts the new .ps1, same as every prior version).
+- Not run through an automated check (no simulator exists for the WinForms window); verify by hand before the next test session: Check UPnP to get a green result, minimize the window, confirm it disappears to the tray with a balloon tip, double-click the tray icon to restore it, then close normally and confirm the usual "closing removes forwards" warning still appears.
+
+(Grok's other suggestion from the same review, remembering the last-used hosting mode and PS2 address between launches, was already built - `%APPDATA%\SCOPS\upnp_ps2_address.txt`, written on every Check UPnP and loaded on startup.)
+
+**Bug found the same night (Dorian's own test, `scops-window.log`): minimizing silently killed the whole app.** The window is run with `$form.ShowDialog()`, which is modal - WinForms ends a `ShowDialog()` call the instant its form becomes invisible for any reason, `Hide()` included, not just `Close()`. The minimize-to-tray code above calls `Hide()`, so minimizing immediately ended the script, skipping `FormClosing` entirely: no "closing removes forwards" step, no DNS helper shutdown, nothing - the log showed `window closed` with none of the usual lines before it (no `window closing, reason=`, no `stopping DNS`, no `DNS terminated`) in the session where this happened.
+- Fix: run the form with `[System.Windows.Forms.Application]::Run($form)` instead of `ShowDialog()`. `Application.Run` keeps the message loop alive while the form is merely hidden, and only ends when the form truly closes (its `Closed` event), so `Hide()` on minimize no longer tears anything down. `FormClosing` (forwards removal, DNS stop, tray cleanup) now only runs on an actual close, same as before V8.20 ever existed.
+- Not run through an automated check (same reason as above - no WinForms simulator). Verify by hand: minimize with forwards held, confirm the window and `scops-window.log` show nothing at all happening (no close/cleanup lines) while minimized, restore from the tray, then close normally and confirm the cleanup lines (`window closing, reason=UserClosing`, `stopping DNS pid ...`, `DNS terminated`) appear exactly as before.
+
+## Findings from the game's own code, kick reply and slow-join lines (2026-11-28)
+A correctly decoded Ghidra export of `SC3_ON.ELF` (R5900 processor, Pandora Tomorrow names applied) and the game's
+settings in `ON_LINS.UMD` were checked against the server. Notes: `docs/WM_PROTOCOL_OPCODES.md` (all 128 WM command
+names, identical to `gsm.py`; the fields the game reads in every lobby reply) and `docs/ONLINE_FIXES.md` (sockets, NAT
+start-up, engine network settings). `tools/umd_extract.py` unpacks a `.UMD` archive (keep the output local).
+- **Kick reply (`SCCT_KICK_REPLY`, off in code, on in `run_public_test.bat`).** Every lobby message the game sent in all
+  the logs has a matching reply except PLAYER_KICK (10): it fell through to the generic empty GSSUCCESS (`UNHANDLED
+  subtype=10`, 6 bytes), the kind of untyped stray reply Round 32 removed for 15/31/34/70 because it later breaks a
+  JOIN_LOBBY with "Couldn't access lobby". The game's kick reply parser (`0x37e380`, `CGSLobbyLib::LobbyRcv_PlayerKick`)
+  reads `['38', ['10', [room id, name]]]`; the server now answers with that echo. Kicks are still recorded for bans
+  as before. Ban/unban (36/40) keep no reply on purpose (round 45, invites), although the game has parsers for them.
+  Checked: the two kick requests from the 2026-11-07 log through the real handler (off = the same 6-byte reply as the
+  log, on = the typed reply); `tools/sim/ranking_tabs_check.py endcheck` identical with the switch off and on.
+- **Slow join lines (`SCCT_RELAY_SLOW_JOIN_LOG`, log only, off in code, on in `run_public_test.bat`).** The game's
+  settings give a new connection 60 s (`InitialConnectTimeout`), then the joining console gives up. A `SLOW JOIN` line
+  is written when a new relay link that the player is still sending on has had no host packet for 50 s, and its AGE
+  line notes it if the host's first packet came after 60 s. Links coming back after a pause are existing connections
+  (`ConnectionTimeout` is 500 s) and are not counted. Simulation: new scenario `sc_slow_join_log` (never answered: one
+  line; answered at ~62 s: one line + one note; paused link: none; routing identical on/off); the whole suite gives
+  identical results with the switch off and on (all new-behaviour scenarios pass).
+- **Relay comment only:** `SCCT_RELAY_REUSE_OTHER_QUIET_S` (15 s) was described as the game's connection timeout. It
+  is not (500 s); 15 s is safe because a live link sends every 0.2 s (`KeepAliveTime`) apart from short pauses after a
+  join or map load. Value unchanged.
+
 ## Ideas for later (not built)
 Parked on 2026-11-22: ranking first needs a full 2v2 (4-player) session. None of these changes the game; each would ship behind a switch.
 - **"Who's online" status page.** The HTTP server publishes a page every 30 s: players online, open rooms, matches today. Off unless switched on in the bat.

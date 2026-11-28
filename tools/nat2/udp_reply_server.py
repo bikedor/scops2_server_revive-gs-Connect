@@ -459,6 +459,14 @@ SILENCE_MIN_RX = int(os.environ.get("SCCT_RELAY_SILENCE_MIN_RX", "20"))   # link
 # hole 45007 was not even logged), so every cold-age value so far was a guess. These lines are the measurement.
 AGE_LOG = os.environ.get("SCCT_RELAY_AGE_LOG", "1").strip().lower() not in ("0", "off", "false", "no")
 AGE_TIMEOUT_S = float(os.environ.get("SCCT_RELAY_AGE_TIMEOUT_S", "70"))
+# Slow join lines (SCCT_RELAY_SLOW_JOIN_LOG, default off; LOG ONLY, needs AGE LOG). 2026-11-28: the game's settings
+# (ON_LINS.UMD, ShadowStrikePS2.ini [IpDrv.TcpNetDriver] InitialConnectTimeout=60.0) give a new connection 60 s to come
+# up, then the joining console gives up. A 'SLOW JOIN' line is written once when a new link (kind=new, not a link coming
+# back after a pause) has had no host packet for SLOW_JOIN_WARN_S, and its AGE line says so when the host's first packet
+# came after 60 s. A link that comes back after a pause is an existing connection (ConnectionTimeout=500 s): not counted.
+SLOW_JOIN_LOG = os.environ.get("SCCT_RELAY_SLOW_JOIN_LOG", "0").strip().lower() not in ("0", "off", "false", "no", "")
+SLOW_JOIN_WARN_S = float(os.environ.get("SCCT_RELAY_SLOW_JOIN_WARN_S", "50"))
+GAME_JOIN_LIMIT_S = 60.0
 AGE_PENDING: dict = {}      # (host ip, joiner endpoint) -> attempt record, until the host's first packet for it
 NAT_NAMES: dict = {}        # console ip -> player name from its NAT requests (names hosts in AGE lines)
 # Shadow hole classes (SCCT_RELAY_SHADOW, default on): LOG ONLY, no routing change. 2026-11-16: COOLDOR with UPnP on was
@@ -724,8 +732,11 @@ JOIN_IDLE_S = float(os.environ.get("SCCT_RELAY_JOIN_IDLE_S", "1.5"))
 # available": 21 failed joins, all on a hole the host had never pinged - usually the third player, sometimes the second).
 # Now a NAT client that has made NAT requests (a real session) keeps its packets on the SRP path.
 SRP_BY_SESSION = _env_on("SCCT_RELAY_SRP_BY_SESSION", "1")
-# Reuse only quiet holes of other players (SCCT_RELAY_REUSE_OTHER_QUIET_S, default 15 = the game's connection timeout;
-# 0 = off). Reusing an open hole whose occupant link is idle is safe for that same player (a rematch), but another
+# Reuse only quiet holes of other players (SCCT_RELAY_REUSE_OTHER_QUIET_S, default 15; 0 = off). 15 s is NOT the game's
+# connection timeout: the game's settings (ON_LINS.UMD, ShadowStrikePS2.ini [IpDrv.TcpNetDriver]) have
+# ConnectionTimeout=500 s, InitialConnectTimeout=60 s, KeepAliveTime=0.2 s. A live link sends at least every 0.2 s apart
+# from pauses of a few seconds right after a join or map load (~6 s seen, below), so a host quiet on a hole for 15 s has
+# stopped using that link; the host's side would not time it out by itself for 500 s. Reusing an open hole whose occupant link is idle is safe for that same player (a rematch), but another
 # player's idle link may still be alive on the host's side. 2026-11-13 23:40:47: Fox's join was given hole 45001, which
 # Snake had joined through 8 s before (his link pauses ~6 s right after a join); the join failed, Snake's link was moved
 # to another hole and he fell out of the room 20 s later. 2026-11-14 00:19:50: Snake's rejoin was put on Wickedness's
@@ -2164,6 +2175,9 @@ def age_emit(rec: dict, now: float, outcome: str, via=None, why: str = "") -> No
         parts.append("steps=[" + "; ".join(f"{t:.0f}s {m}" for t, m in rec["events"]) + "]")
     if why:
         parts.append(f"({why})")
+    if (SLOW_JOIN_LOG and rec["kind"] == "new" and outcome == "answered"
+            and now - rec["t0"] > GAME_JOIN_LIMIT_S and rec.get("slow_warned")):
+        parts.append(f"(SLOW JOIN: first host packet after the game's {GAME_JOIN_LIMIT_S:.0f}s join limit)")
     log(" ".join(parts))
     if FAST_RESUME_LOG:
         fast_resume_check(rec, now, outcome)
@@ -2185,6 +2199,15 @@ def age_tick(now: float) -> None:
             last = hv["eps"][ep][1]
             age_emit(rec, now, "never", why=f"no host packet in {AGE_TIMEOUT_S:.0f}s; player "
                                             + ("still sending" if now - last <= LINK_IDLE_S else f"quiet {now - last:.0f}s"))
+        elif (SLOW_JOIN_LOG and rec["kind"] == "new" and not rec.get("slow_warned")
+              and now - rec["t0"] >= SLOW_JOIN_WARN_S and now - hv["eps"][ep][1] <= LINK_IDLE_S):
+            # only while the player still sends on it: a one-second join probe that stopped long ago is not a wait
+            rec["slow_warned"] = True
+            hname = NAT_NAMES.get(host)
+            log(f"SLOW JOIN host={hname + ' ' if hname else ''}{host} player={_who(ep[0])}:{ep[1]} "
+                f"hole={rec['cur'] if rec['cur'] is not None else 'none'} ctx={rec['ctx']}: no host packet after "
+                f"{now - rec['t0']:.0f}s; the game gives up on a join at {GAME_JOIN_LIMIT_S:.0f}s (InitialConnectTimeout)"
+                + (f"; steps=[" + "; ".join(f"{t:.0f}s {m}" for t, m in rec["events"]) + "]" if rec["events"] else ""))
 
 
 
@@ -3261,6 +3284,9 @@ def main(argv=None) -> int:
         log(f"  AGE LOG: " + (f"on (log only) - one 'AGE' line per link start or return on a hole: host silence there, cold "
             f"verdict, holds/moves, and the wait for the host's first packet (outcome=never after {AGE_TIMEOUT_S:.0f}s)"
             if AGE_LOG else "off"))
+        log(f"  SLOW JOIN LOG: " + (f"on (log only) - 'SLOW JOIN' line when a new link has no host packet after "
+            f"{SLOW_JOIN_WARN_S:.0f}s (the game gives up on a join at {GAME_JOIN_LIMIT_S:.0f}s)"
+            if SLOW_JOIN_LOG and AGE_LOG else "on, but no lines (needs AGE LOG)" if SLOW_JOIN_LOG else "off"))
         log(f"  SHADOW HOLES: " + (f"on (log only) - evidence per kind of hole (pinged <= {HOLD_PING_OPEN_S:.0f}s, fresh = never or "
             f">= {SHADOW_FRESH_S:.0f}s, stale = in between) and a 'SHADOW link' line saying what a fresh-hole rule would do; "
             f"routing unchanged" if SHADOW and AGE_LOG else "on, but no SHADOW link lines (needs AGE LOG)" if SHADOW else "off"))

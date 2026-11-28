@@ -2471,6 +2471,17 @@ def handle_message(
         if lobby_subtype in (10, 36, 40):
             _kickban_record(lobby_subtype, _req_payload_strs(msg), clt.username, log_fp=log_fp)
 
+        if lobby_subtype == 10 and os.environ.get("SCCT_KICK_REPLY", "0").strip().lower() in ("1", "on", "true", "yes", "typed"):
+            # 2026-11-28: PLAYER_KICK ['10', [room, name, '']] used to fall through to the generic empty GSSUCCESS at the
+            # end (logged "UNHANDLED subtype=10"), an untyped stray reply like the ones Round 32 removed for 15/31/34/70.
+            # The game waits for a typed reply: its PLAYER_KICK reply parser (SC3_ON.ELF 0x37e380,
+            # CGSLobbyLib::LobbyRcv_PlayerKick) reads ['38', ['10', [<int>, <string>]]], i.e. the room id and the name.
+            # Answer with that echo. Off by default (SCCT_KICK_REPLY=0 keeps the old reply).
+            _plk = _req_payload_strs(msg)
+            _kick_pl = [_plk[0] if _plk else "0", _plk[1] if len(_plk) > 1 else ""]
+            log_line(f"[{now_ts()}] ROUTER_WM LOBBY_MSG 10 (kick) from {clt.username!r}: {_plk} -> typed reply {_kick_pl}", log_fp=log_fp)
+            return _lobby_reply(msg, 10, _kick_pl)
+
         if lobby_subtype in (36, 40) and os.environ.get("SCCT_BAN_REPLY", "none").strip().lower() not in ("off", "false", "no", "old"):
             # PLAYER_BAN / PLAYER_UNBAN: the game sends PLAYER_UNBAN [room, player] with every invite. The generic
             # untyped reply used before is a stray reply that can upset the client's reply queue; answer with a typed
@@ -3006,7 +3017,7 @@ def handle_message(
             if lobby_subtype == 17:
                 _mid = _lobby_state.__dict__.get("next_match_id", 1)
                 _lobby_state.__dict__["next_match_id"] = _mid + 1
-                _matches[_rid] = {"id": _mid, "order": [], "values": {}, "players": [str(v.get("username")) for _k, v in _room_targets(_rid)]}
+                _matches[_rid] = {"id": _mid, "order": [], "values": {}, "players": [str(v.get("username")) for _k, v in _room_targets(_rid)], "t0": time.time()}
                 log_line(f"[{now_ts()}] RANKED_FLOW match {_mid} started in room {_rid}, players={_matches[_rid]['players']}", log_fp=log_fp)
                 # Ranked / free label (log only). The room blob does not say it plainly, so the label comes from what the
                 # consoles did in this room's earlier matches: a ranked room sends scores (msg 30), a free room never does.
@@ -3277,7 +3288,9 @@ def handle_message(
                                      f"{_lobby_state.__dict__.get('room_kind', {}).get(str(_rid) + ':created', 'unknown')})")
                         else:
                             _what = "no scores, nothing to record; normal for a Free room"
-                        log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_m['id']} ended: {_kt} - {_what}; host={_m.get('host', 'unknown')!r}", log_fp=log_fp)
+                        _t0 = _m.get("t0")
+                        _dur = f"{int(time.time() - _t0)}s" if _t0 else "unknown"
+                        log_line(f"[{now_ts()}] ROOM_KIND room {_rid} match {_m['id']} ended: {_kt} - {_what}; host={_m.get('host', 'unknown')!r}; duration={_dur}", log_fp=log_fp)
                     except Exception as _e:
                         log_line(f"[{now_ts()}] ROOM_KIND failed: {_e!r}", log_fp=log_fp)
                     _push_room(_rid, 71, _final)

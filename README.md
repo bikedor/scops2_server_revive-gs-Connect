@@ -319,6 +319,8 @@ Optional friend settings (defaults work; change only when testing):
 | `SCCT_INVITE_REFRESH` | refresh the host's friend list after an invite is taken |
 | `SCCT_MOTD=0` | turn the News / message of the day off |
 | `SCCT_BAN_REPLY` | how ban/unban notifications are answered (default: no reply) |
+| `SCCT_KICK_REPLY=1` | answer PLAYER_KICK with the typed reply the game reads (room id + name); `0` = old generic reply |
+| `SCCT_RELAY_SLOW_JOIN_LOG=1` | log a `SLOW JOIN` line when a new relay link has no host packet after 50 s (log only) |
 | `SCCT_KICKBAN=1` | remember bans per room and refuse banned players at join; `0` turns this off |
 | `SCCT_BAN_JOIN_REASON=7` | refusal code a banned player gets (7 = room full, 1 = no longer available) |
 
@@ -415,7 +417,7 @@ The server has been run on a **Windows VPS** (Servarica, 38.49.212.120) with thi
 
 - Install Python 3 (tick "Add to PATH"). The DNAS answer is the Go program `dnasrep.exe` (in `dnasrep_test\`), so **OpenSSL is not needed**: with `SCCT_DNAS_EXTERNAL=1` the start script skips the OpenSSL check and certificate step.
 - Run `SCOPS Server.bat` (it asks for administrator rights) and choose **Internet**. Edit `HostIP`/public IP to the VPS address first, and run `open_ports.ps1` once for the Windows firewall. Also open the same ports in the VPS provider's panel.
-- Keep `state/users.json` and logs out of git (see `.gitignore`). Passwords are stored in plain text.
+- Keep `state/users.json` and logs out of git (see `.gitignore`). Passwords are stored as salted PBKDF2 hashes (2026-11-25); an old plain-text account is hashed automatically the next time it logs in correctly.
 - 18-19 Nov 2026: a 4-player session of about 3.5 hours ran here through the relay with 18 ranked 2v2 matches recorded (see Status).
 - For unattended running, use a scheduled task that starts the launcher at boot. A weekly reboot is optional.
 
@@ -426,7 +428,6 @@ A small VPS (1 vCPU, 1–2 GB RAM) is enough for the Python services. Internet p
 - Set `SCCT_ALLOW_PUBLIC=1` (the LAN-only filter otherwise ignores outside consoles) and `SCCT_PUBLIC_IP` to the server's public IP; outside clients are then told that address (see "Hosting from a home PC").
 - The NAT service reports the address it observes (or the public IP with `SCCT_NAT_PUBLIC_ADDR=1` for LAN players). A real PS2 behind a different network reaching a PCSX2 host worked in the home test; two consoles both behind home routers have not been tried.
 - DNS for outside clients is answer-only: it answers the game's override hostnames and refuses everything else, so it is not an open resolver. Bots still probe ports 53 and 80 within hours.
-- `state/users.json` stores passwords in plain text. Hash them (or at least keep the file private and out of git) before the server is public.
 - Open only the ports listed under "Port forwarding". Never put the server PC in a router DMZ; for players, DMZ is only a last resort, for a console (see "Hosting a room").
 - Trim or rotate logs, since they contain players' IP addresses.
 - Players who host rooms need UDP 3658 and 10070-10080 forwarded on their own router, unless the relay is on (see "UDP relay" and "Port forwarding").

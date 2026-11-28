@@ -136,6 +136,53 @@ SCCT_R9=none  SCCT_9FORM=ref
 - The client auto-sends 109 + 8 when backing out of the games list, then 23 on the lobby connection ~1 s later.
 - Room list entry (20 fields): type, name, id, lobby_sv_id, parent_id, config, level, master, allowed_games, games,
   info blob, event_id, max_players, nb_players, max_visitors, nb_visitors, game_version, gs_version, ip, alt_ip.
+- Full WM command table and the field layout of every lobby reply the client reads: `docs/WM_PROTOCOL_OPCODES.md`.
+
+### Game sockets and public-address lookup (R5900 export, 2026-11-28)
+- `0x35e540` starts the game's peer networking. It first connects a NAT service on **UDP 10070**
+  (`0x44e770`, product `SPLINTERCELL3PS2US`, version `SC3PS2US1.0`) and sets `+0x28` = 1 when that works.
+  It then opens four UDP sockets (`0x25d620`): **3658** (128 KB buffers, main match traffic) and
+  **10071, 10072, 10073** (32 KB each). So the game itself uses 3658 and 10070-10073; the 10070-10080
+  forward from the manual covers that with room to spare.
+- `0x35ee70` shuts it down: disconnects the NAT service, closes the main socket, sets `+0x534` = 1.
+- Each socket is registered with the NAT service (`0x44e960`, only call site in `0x25d620`) with two callbacks:
+  `0x25d1a0` sends a probe from that socket (three times until answered), `0x25d2b0` stores the public
+  IP and port the answer reports, marks the socket resolved (`+0x35` = 1) and stores a timestamp.
+- The resolved addresses are copied into the player's own record (around `+0x648`..`+0x65c`), which is
+  what other players are given. Nothing marks a socket unresolved again until the sockets are reopened, so
+  the lookup happens once per online session. No counter or limit (e.g. the ~11 joins per host login) is
+  in this code.
+- Hypothesis, not confirmed: if a host's router changes the game's public port mid-session, the game keeps
+  advertising the old address until the host backs out to the Online menu and comes back, which matches
+  "backing out resets the join limit". To check: in a capture from a host who hits the limit, compare the
+  address the host advertises with the address its packets arrive from.
+- Player record `+0x604` = finished-games percentage, (games - disconnects) x 100 / games, 0xFF under 10
+  games (same formula as in BETA.md).
+- Patched build: `0x35e540` was turned into `li v0,1; jr ra`. The function returns nothing, so this skips the
+  whole start-up above rather than forcing a success.
+- The `8` and `11` that `clProxyConnection` passes to `clConnectElem` are the sender/receiver codes in byte 5 of
+  every GS message header (8 = proxy/NAT-related, 11 = PROXY, same as `SENDER_RECEIVER` in `gsm.py`), not a limit.
+
+### Engine network settings (ON_LINS.UMD, 2026-11-28)
+`ON_LINS.UMD` is an `FFileManagerArc` archive (reader at `0x1183f0`): directory offset in a trailer 0x800 bytes from
+the end, then name / offset / size / flags per file; flag 2 = RC4 keyed with the file's own name (`0x143a50`,
+`0x143af0`). `tools/umd_extract.py ARCHIVE OUTDIR` unpacks it. Keep the output local (game files).
+`ShadowStrikePS2.ini`, `[IpDrv.TcpNetDriver]` (the match connection between players, UDP 3658):
+
+| Setting | Value | Meaning in Unreal Engine 2 |
+|---|---|---|
+| ConnectionTimeout | 500.0 s | a connected player is dropped after this long with nothing received |
+| InitialConnectTimeout | 60.0 s | limit for a join to finish connecting |
+| KeepAliveTime | 0.2 s | send at least every 0.2 s (the check at `0x18dca0`) |
+| AckTimeout / RelevantTimeout | 500.0 s | |
+| ServerTravelPause | 4.0 s | pause before a map change |
+| NetServerMaxTickRate / LanServerMaxTickRate | 20 / 35 | host send rate, internet / LAN |
+| AllowPlayerPortUnreach / LogPortUnreach | False / False | |
+| Internet net speed (client and listen server) | 5000-7900 | bytes/s; LAN 8000-12000 client, 16000-32000 host |
+
+Port=3658 is in `[URL]`. With a 500 s connection timeout, the engine's own timer is not what drops players after a
+few seconds of trouble: the quick "lost connection" / "Returning to lobby" cases must come from the game's own logic
+or from a connection being closed outright. The 60 s join limit is the one that can matter for slow relay joins.
 
 ## Test flow
 1. Start `run_test_keep.bat`; clients log in (`LOBBYSERVERLOGIN` should show each real LAN IP).
